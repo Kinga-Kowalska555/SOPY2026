@@ -1,0 +1,149 @@
+#define _XOPEN_SOURCE 700
+
+#include <dirent.h>
+#include <errno.h>
+#include <limits.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+// Błąd funkcji systemowej: wypisz przyczynę (perror) i miejsce w kodzie, zakończ program.
+#define ERR(source) (perror(source), fprintf(stderr, "%s:%d\n", __FILE__, __LINE__), exit(EXIT_FAILURE))
+
+void usage(const char* pname)
+{
+    fprintf(stderr,
+            "USAGE: %s -p <path> [-p <path> ...] [-e <extension>] [-d <depth>] [-o]\n"
+            "  -p <path>       directory to scan (can be given many times)\n"
+            "  -e <extension>  print only files with this extension\n"
+            "  -d <depth>      scan depth, 1 = only the directory itself (default 1)\n"
+            "  -o              write output to file from L1_OUTPUTFILE variable\n",
+            pname);
+    exit(EXIT_FAILURE);
+}
+
+// Czy nazwa pliku ma rozszerzenie ext? (ext == NULL oznacza brak filtra)
+int has_extension(const char* name, const char* ext)
+{
+    if (!ext)
+        return 1;
+    const char* dot = strrchr(name, '.');  // ostatnia kropka w nazwie
+    return dot && strcmp(dot + 1, ext) == 0;
+}
+
+// Wypisuje pliki z katalogu path, a potem (jeśli depth > 1) skanuje jego podkatalogi.
+void scan_dir(const char* path, int depth, const char* ext, FILE* out)
+{
+    DIR* dir;
+    struct dirent* entry;
+    struct stat st;
+    char full[PATH_MAX];
+
+    if (!(dir = opendir(path)))
+        ERR("opendir");
+
+    fprintf(out, "path: %s\n", path);
+
+    // Przejście 1: zwykłe pliki z bieżącego katalogu.
+    // Przejście 2 (po rewinddir): podkatalogi, żeby wypisywały się po plikach.
+    for (int pass = 1; pass <= 2; pass++)
+    {
+        if (pass == 2)
+        {
+            if (depth <= 1)  // nie wolno schodzić głębiej
+                break;
+            rewinddir(dir);
+        }
+
+        errno = 0;
+        while ((entry = readdir(dir)) != NULL)
+        {
+            if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, ".."))
+                continue;
+
+            if (snprintf(full, PATH_MAX, "%s/%s", path, entry->d_name) >= PATH_MAX)
+            {
+                fprintf(stderr, "path too long: %s/%s\n", path, entry->d_name);
+                exit(EXIT_FAILURE);
+            }
+            // lstat (a nie stat): dowiązań symbolicznych nie śledzimy
+            if (lstat(full, &st))
+                ERR("lstat");
+
+            if (pass == 1 && S_ISREG(st.st_mode) && has_extension(entry->d_name, ext))
+                fprintf(out, "%s %lld\n", entry->d_name, (long long)st.st_size);
+            else if (pass == 2 && S_ISDIR(st.st_mode))
+                scan_dir(full, depth - 1, ext, out);
+
+            errno = 0;  // readdir zwraca NULL i przy końcu, i przy błędzie - odróżnia je errno
+        }
+        if (errno)
+            ERR("readdir");
+    }
+
+    if (closedir(dir))
+        ERR("closedir");
+}
+
+int main(int argc, char** argv)
+{
+    char* ext = NULL;  // -e
+    int depth = 1;     // -d
+    int to_file = 0;   // -o
+    int path_count = 0;
+    int c;
+
+    // Ścieżek (-p) nie może być więcej niż argumentów programu.
+    char** paths = malloc(argc * sizeof(char*));
+    if (!paths)
+        ERR("malloc");
+
+    // 1. Wczytanie opcji.
+    while ((c = getopt(argc, argv, "p:e:d:o")) != -1)
+    {
+        switch (c)
+        {
+            case 'p':
+                paths[path_count++] = optarg;
+                break;
+            case 'e':
+                ext = optarg;
+                break;
+            case 'd':
+            {
+                char* end;
+                depth = strtol(optarg, &end, 10);
+                if (*end != '\0' || depth < 1)  // np. "-d abc" albo "-d 0"
+                    usage(argv[0]);
+                break;
+            }
+            case 'o':
+                to_file = 1;
+                break;
+            default:
+                usage(argv[0]);
+        }
+    }
+    if (path_count == 0 || optind < argc)  // brak -p albo nadmiarowe argumenty
+        usage(argv[0]);
+
+    // 2. Wybór wyjścia: domyślnie stdout, z -o plik z L1_OUTPUTFILE (jeśli zmienna istnieje).
+    FILE* out = stdout;
+    char* out_name = getenv("L1_OUTPUTFILE");
+    if (to_file && out_name)
+    {
+        if (!(out = fopen(out_name, "w")))  // "w" nadpisuje istniejący plik
+            ERR("fopen");
+    }
+
+    // 3. Skanowanie wszystkich podanych katalogów.
+    for (int i = 0; i < path_count; i++)
+        scan_dir(paths[i], depth, ext, out);
+
+    if (out != stdout && fclose(out))
+        ERR("fclose");
+    free(paths);
+    return EXIT_SUCCESS;
+}
