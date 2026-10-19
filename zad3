@@ -1,0 +1,308 @@
+#define _XOPEN_SOURCE 700
+
+#include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <time.h>
+#include <unistd.h>
+
+// Błąd funkcji systemowej: wypisz przyczynę (perror) i miejsce w kodzie, zakończ program.
+#define ERR(source) (perror(source), fprintf(stderr, "%s:%d\n", __FILE__, __LINE__), exit(EXIT_FAILURE))
+
+/* ============================ Obsługa błędów ============================ */
+
+void usage(const char* pname)
+{
+    fprintf(stderr,
+            "usage:\n"
+            "  %s -c -v <ENVIRONMENT_NAME>                          create environment\n"
+            "  %s -v <ENVIRONMENT_NAME> [-v ...] -i <PACKAGE>==<VERSION>  install package\n"
+            "  %s -v <ENVIRONMENT_NAME> [-v ...] -r <PACKAGE>             remove package\n",
+            pname, pname, pname);
+    exit(EXIT_FAILURE);
+}
+
+// Błąd użytkownika (zła składnia, brak środowiska): komunikat + usage.
+void fail_usage(const char* pname, const char* msg)
+{
+    fprintf(stderr, "sop-venv: %s\n", msg);
+    usage(pname);
+}
+
+// Błąd operacji na pakiecie (np. pakiet już zainstalowany): sam komunikat.
+void fail(const char* msg, const char* env, const char* package)
+{
+    fprintf(stderr, "sop-venv: %s: %s (environment: %s)\n", msg, package, env);
+    exit(EXIT_FAILURE);
+}
+
+/* ============================ Funkcje pomocnicze ============================ */
+
+// Składa ścieżkę "dir/file" w podanym buforze o rozmiarze PATH_MAX.
+void make_path(char* buf, const char* dir, const char* file)
+{
+    int n = snprintf(buf, PATH_MAX, "%s/%s", dir, file);
+    if (n < 0 || n >= PATH_MAX)
+    {
+        fprintf(stderr, "sop-venv: path too long: %s/%s\n", dir, file);
+        exit(EXIT_FAILURE);
+    }
+}
+
+// Środowisko istnieje, gdy jest katalogiem i zawiera plik requirements.
+int env_exists(const char* env)
+{
+    struct stat st;
+    char path[PATH_MAX];
+
+    if (stat(env, &st) || !S_ISDIR(st.st_mode))
+        return 0;
+    make_path(path, env, "requirements");
+    return stat(path, &st) == 0;
+}
+
+// Nazwa pakietu staje się nazwą pliku, więc nie może zawierać '/' ani spacji
+// (spacja oddziela nazwę od wersji w requirements) i nie może kolidować z requirements.
+int valid_package_name(const char* name)
+{
+    if (!strcmp(name, "") || !strcmp(name, ".") || !strcmp(name, "..") || !strcmp(name, "requirements"))
+        return 0;
+    return strchr(name, '/') == NULL && strchr(name, ' ') == NULL;
+}
+
+// Czy linia z requirements ("nazwa wersja\n") dotyczy pakietu name?
+int line_matches(const char* line, const char* name)
+{
+    size_t len = strlen(name);
+    return strncmp(line, name, len) == 0 && line[len] == ' ';
+}
+
+// Czy pakiet name jest wpisany w requirements środowiska env?
+int is_installed(const char* env, const char* name)
+{
+    char path[PATH_MAX];
+    char* line = NULL;
+    size_t len = 0;
+    int found = 0;
+    FILE* f;
+
+    make_path(path, env, "requirements");
+    if (!(f = fopen(path, "r")))
+        ERR("fopen");
+
+    while (!found && getline(&line, &len, f) != -1)
+        if (line_matches(line, name))
+            found = 1;
+    if (ferror(f))
+        ERR("getline");
+
+    free(line);
+    if (fclose(f))
+        ERR("fclose");
+    return found;
+}
+
+/* ============================ Operacje ============================ */
+
+// -c: utworzenie katalogu środowiska i pustego pliku requirements.
+void create_env(const char* env)
+{
+    char path[PATH_MAX];
+    int fd;
+
+    if (mkdir(env, 0755))
+    {
+        if (errno == EEXIST)
+        {
+            fprintf(stderr, "sop-venv: the environment already exists: %s\n", env);
+            exit(EXIT_FAILURE);
+        }
+        ERR("mkdir");
+    }
+
+    make_path(path, env, "requirements");
+    if ((fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0644)) < 0)
+        ERR("open");
+    if (close(fd))
+        ERR("close");
+}
+
+// Tworzy plik pakietu wypełniony losowymi literami, z prawami r--r--r--.
+void create_package_file(const char* env, const char* name)
+{
+    char path[PATH_MAX];
+    char content[100];
+    int size = 10 + rand() % 91;  // losowy rozmiar 10..100 bajtów
+    int fd;
+
+    for (int i = 0; i < size; i++)
+        content[i] = 'a' + rand() % 26;
+
+    make_path(path, env, name);
+    // O_EXCL: błąd, jeśli plik już istnieje. Prawa 0444 = tylko odczyt dla wszystkich
+    // (mimo to możemy pisać przez ten deskryptor, bo plik właśnie tworzymy).
+    if ((fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0444)) < 0)
+    {
+        if (errno == EEXIST)
+            fail("package file already exists", env, name);
+        ERR("open");
+    }
+    if (write(fd, content, size) != size)
+        ERR("write");
+    if (close(fd))
+        ERR("close");
+}
+
+// -i: dopisanie "nazwa wersja" do requirements i utworzenie pliku pakietu.
+void install_package(const char* env, const char* name, const char* version)
+{
+    char path[PATH_MAX];
+    FILE* f;
+
+    if (is_installed(env, name))
+        fail("package is already installed", env, name);
+
+    create_package_file(env, name);
+
+    make_path(path, env, "requirements");
+    if (!(f = fopen(path, "a")))  // "a" = dopisywanie na końcu pliku
+        ERR("fopen");
+    if (fprintf(f, "%s %s\n", name, version) < 0)
+        ERR("fprintf");
+    if (fclose(f))
+        ERR("fclose");
+}
+
+// -r: usunięcie linii pakietu z requirements oraz pliku pakietu.
+// Plik przepisujemy do pliku tymczasowego bez tej linii, a potem podmieniamy (rename).
+void remove_package(const char* env, const char* name)
+{
+    char path[PATH_MAX], tmp_path[PATH_MAX];
+    char* line = NULL;
+    size_t len = 0;
+    FILE *in, *out;
+
+    if (!is_installed(env, name))
+        fail("package is not installed", env, name);
+
+    make_path(path, env, "requirements");
+    make_path(tmp_path, env, "requirements.tmp");
+    if (!(in = fopen(path, "r")))
+        ERR("fopen");
+    if (!(out = fopen(tmp_path, "w")))
+        ERR("fopen");
+
+    while (getline(&line, &len, in) != -1)
+        if (!line_matches(line, name))
+            if (fputs(line, out) == EOF)
+                ERR("fputs");
+    if (ferror(in))
+        ERR("getline");
+
+    free(line);
+    if (fclose(in))
+        ERR("fclose");
+    if (fclose(out))
+        ERR("fclose");
+    if (rename(tmp_path, path))
+        ERR("rename");
+
+    // Usuwanie pliku zależy od praw katalogu, więc r--r--r-- nie przeszkadza.
+    make_path(path, env, name);
+    if (unlink(path) && errno != ENOENT)
+        ERR("unlink");
+}
+
+/* ============================ main ============================ */
+
+int main(int argc, char** argv)
+{
+    char operation = 0;     // 'c', 'i' albo 'r'
+    char* package = NULL;   // argument -i lub -r
+    char* version = NULL;   // tylko dla -i
+    int env_count = 0;
+    int c;
+
+    // Środowisk (-v) nie może być więcej niż argumentów programu.
+    char** envs = malloc(argc * sizeof(char*));
+    if (!envs)
+        ERR("malloc");
+
+    // 1. Wczytanie opcji (getopt pozwala podawać je w dowolnej kolejności).
+    while ((c = getopt(argc, argv, "cv:i:r:")) != -1)
+    {
+        switch (c)
+        {
+            case 'v':
+                envs[env_count++] = optarg;
+                break;
+            case 'c':
+            case 'i':
+            case 'r':
+                if (operation)
+                    fail_usage(argv[0], "only one operation (-c, -i, -r) can be given");
+                operation = c;
+                package = optarg;  // dla -c optarg == NULL
+                break;
+            default:  // nieznana opcja lub brak argumentu opcji
+                usage(argv[0]);
+        }
+    }
+
+    // Dopuszczamy też skróconą formę "-c <NAME>" (jak w przykładzie z treści).
+    if (operation == 'c' && env_count == 0 && optind == argc - 1)
+        envs[env_count++] = argv[optind++];
+    if (optind < argc)
+        fail_usage(argv[0], "unexpected argument");
+
+    // 2. Sprawdzenie poprawności komendy.
+    if (!operation)
+        fail_usage(argv[0], "no operation given");
+    if (env_count == 0)
+        fail_usage(argv[0], "no environment given");
+
+    if (operation == 'c')
+    {
+        if (env_count > 1)
+            fail_usage(argv[0], "only one environment can be created at a time");
+        create_env(envs[0]);
+        free(envs);
+        return EXIT_SUCCESS;
+    }
+
+    // Przed jakąkolwiek zmianą upewniamy się, że wszystkie środowiska istnieją.
+    for (int i = 0; i < env_count; i++)
+        if (!env_exists(envs[i]))
+            fail_usage(argv[0], "the environment does not exist");
+
+    if (operation == 'i')
+    {
+        // Rozdzielenie "nazwa==wersja": w miejscu "==" wstawiamy koniec napisu.
+        char* sep = strstr(package, "==");
+        if (!sep)
+            fail_usage(argv[0], "package must be given as <PACKAGE>==<VERSION>");
+        *sep = '\0';
+        version = sep + 2;
+        if (!strcmp(version, "") || strchr(version, ' '))
+            fail_usage(argv[0], "invalid package version");
+    }
+    if (!valid_package_name(package))
+        fail_usage(argv[0], "invalid package name");
+
+    // 3. Wykonanie operacji na każdym środowisku (błąd kończy program).
+    srand(time(NULL) ^ getpid());  // getpid: różne ziarno nawet dla uruchomień w tej samej sekundzie
+    for (int i = 0; i < env_count; i++)
+    {
+        if (operation == 'i')
+            install_package(envs[i], package, version);
+        else
+            remove_package(envs[i], package);
+    }
+
+    free(envs);
+    return EXIT_SUCCESS;
+}
