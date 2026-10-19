@@ -1,0 +1,120 @@
+#define _XOPEN_SOURCE 700
+
+#include <dirent.h>
+#include <errno.h>
+#include <limits.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+// Błąd funkcji systemowej: wypisz przyczynę (perror) i miejsce w kodzie, zakończ program.
+#define ERR(source) (perror(source), fprintf(stderr, "%s:%d\n", __FILE__, __LINE__), exit(EXIT_FAILURE))
+
+void usage(const char* pname)
+{
+    fprintf(stderr,
+            "USAGE: %s [-p <dir> ...] [-o <file>]\n"
+            "  -p <dir>   directory to list (can be given many times, default: current directory)\n"
+            "  -o <file>  write output to file instead of stdout (at most once)\n",
+            pname);
+    exit(EXIT_FAILURE);
+}
+
+// Wypisuje listing katalogu path (nazwa + rozmiar każdego obiektu) do out.
+// Zwraca 0 gdy się udało, -1 gdy katalogu nie da się otworzyć (np. nie istnieje, brak dostępu).
+int list_dir(const char* path, FILE* out)
+{
+    DIR* dir;
+    struct dirent* entry;
+    struct stat st;
+    char full[PATH_MAX];
+
+    if (!(dir = opendir(path)))
+    {
+        // Nie kończymy programu - wypisujemy błąd i wracamy, main przejdzie do kolejnej ścieżki.
+        fprintf(stderr, "cannot open directory %s: %s\n", path, strerror(errno));
+        return -1;
+    }
+
+    fprintf(out, "SCIEZKA:\n%s\nLISTA PLIKÓW:\n", path);
+
+    errno = 0;
+    while ((entry = readdir(dir)) != NULL)
+    {
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, ".."))
+            continue;
+
+        // Rozmiar sprawdzamy przez lstat na pełnej ścieżce "katalog/nazwa".
+        // lstat (a nie stat), żeby dla dowiązania symbolicznego pokazać jego własny rozmiar.
+        if (snprintf(full, PATH_MAX, "%s/%s", path, entry->d_name) >= PATH_MAX)
+        {
+            fprintf(stderr, "path too long: %s/%s\n", path, entry->d_name);
+            exit(EXIT_FAILURE);
+        }
+        if (lstat(full, &st))
+            ERR("lstat");
+
+        fprintf(out, "%s %lld\n", entry->d_name, (long long)st.st_size);
+        errno = 0;  // readdir zwraca NULL i przy końcu, i przy błędzie - odróżnia je errno
+    }
+    if (errno)
+        ERR("readdir");
+
+    if (closedir(dir))
+        ERR("closedir");
+    return 0;
+}
+
+int main(int argc, char** argv)
+{
+    char* out_name = NULL;  // -o
+    int path_count = 0;
+    int c;
+
+    // Ścieżek (-p) nie może być więcej niż argumentów programu.
+    char** paths = malloc(argc * sizeof(char*));
+    if (!paths)
+        ERR("malloc");
+
+    // 1. Wczytanie opcji.
+    while ((c = getopt(argc, argv, "p:o:")) != -1)
+    {
+        switch (c)
+        {
+            case 'p':
+                paths[path_count++] = optarg;
+                break;
+            case 'o':
+                if (out_name)  // drugie -o to błąd
+                    usage(argv[0]);
+                out_name = optarg;
+                break;
+            default:  // nieobsługiwana opcja albo -p/-o bez argumentu
+                usage(argv[0]);
+        }
+    }
+    if (optind < argc)  // dodatkowe parametry pozycyjne
+        usage(argv[0]);
+
+    // Bez -p listujemy katalog roboczy (etapy 1 i 2).
+    if (path_count == 0)
+        paths[path_count++] = ".";
+
+    // 2. Wybór wyjścia: plik z -o albo stdout.
+    FILE* out = stdout;
+    if (out_name && !(out = fopen(out_name, "w")))
+        ERR("fopen");
+
+    // 3. Listing każdego katalogu; błąd jednego nie przerywa pozostałych.
+    int result = EXIT_SUCCESS;
+    for (int i = 0; i < path_count; i++)
+        if (list_dir(paths[i], out))
+            result = EXIT_FAILURE;
+
+    if (out != stdout && fclose(out))
+        ERR("fclose");
+    free(paths);
+    return result;
+}
