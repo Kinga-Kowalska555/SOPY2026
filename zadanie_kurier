@@ -1,0 +1,332 @@
+
+#ifndef COMMON_H
+#define COMMON_H
+
+#define _XOPEN_SOURCE 700
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+#include <limits.h>
+#include <unistd.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/uio.h>
+#include <fcntl.h>
+#include <ftw.h>
+
+#define MAXFD 10
+
+#define ERR(msg) do { \
+    perror(msg); \
+    exit(EXIT_FAILURE); \
+} while (0)
+
+typedef struct {
+    unsigned long packages;
+    unsigned long letters;
+
+    unsigned long long* package_weights;
+    unsigned long long* letter_weights;
+} shipment_t;
+
+static void usage(const char* program)
+{
+    fprintf(stderr, "Uzycie: %s [m] [w] [p]\n", program);
+    exit(EXIT_FAILURE);
+}
+
+#endif
+
+
+
+#include "common.h"
+
+#define WAREHOUSE_PREFIX "magazyn_"
+#define POINT_PREFIX "punkt_"
+
+// ETAP 2 - wypisywanie magazynow
+void print_warehouses(const char* path)
+{
+    DIR* dirp;
+    struct dirent* dp;
+    struct stat filestat;
+
+    char cwd[PATH_MAX];
+
+    if (getcwd(cwd, PATH_MAX) == NULL)
+        ERR("getcwd");
+
+    if (chdir(path))
+        ERR("chdir");
+
+    if ((dirp = opendir(".")) == NULL)
+        ERR("opendir");
+
+    do
+    {
+        errno = 0;
+
+        if ((dp = readdir(dirp)) != NULL)
+        {
+            if (lstat(dp->d_name, &filestat))
+                ERR("lstat");
+
+            if (S_ISDIR(filestat.st_mode))
+            {
+                if (strncmp(dp->d_name,
+                            WAREHOUSE_PREFIX,
+                            sizeof(WAREHOUSE_PREFIX) - 1) == 0)
+                {
+                    printf("Magazyn w miescie %s\n",
+                           dp->d_name +
+                           sizeof(WAREHOUSE_PREFIX) - 1);
+                }
+            }
+        }
+    } while (dp != NULL);
+
+    if (errno != 0)
+        ERR("readdir");
+
+    if (closedir(dirp))
+        ERR("closedir");
+
+    if (chdir(cwd))
+        ERR("chdir");
+}
+
+// ETAP 3 - obliczanie lacznej wagi
+void calculate_weights(const char* path)
+{
+    DIR* dirp;
+    struct dirent* dp;
+    struct stat filestat;
+    shipment_t shipment = {0};
+    int fd = -1;
+
+    char cwd[PATH_MAX];
+
+    if (getcwd(cwd, PATH_MAX) == NULL)
+        ERR("getcwd");
+
+    if (chdir(path))
+        ERR("chdir");
+
+    if ((dirp = opendir(".")) == NULL)
+        ERR("opendir");
+
+    do
+    {
+        errno = 0;
+
+        if ((dp = readdir(dirp)) != NULL)
+        {
+            if (lstat(dp->d_name, &filestat))
+                ERR("lstat");
+
+            if (S_ISREG(filestat.st_mode))
+            {
+                if (sscanf(dp->d_name,
+                           "%lupaczki_%lulisty",
+                           &shipment.packages,
+                           &shipment.letters) == 2)
+                {
+                    if ((fd = open(dp->d_name, O_RDONLY)) < 0)
+                        ERR("open");
+
+                    break;
+                }
+            }
+        }
+    } while (dp != NULL);
+
+    if (errno != 0)
+        ERR("readdir");
+
+    if (closedir(dirp))
+        ERR("closedir");
+
+    if (fd < 0)
+    {
+        if (chdir(cwd))
+            ERR("chdir");
+        return;
+    }
+
+    // Alokacja dynamiczna
+    shipment.package_weights =
+        malloc(shipment.packages * sizeof(unsigned long long));
+
+    shipment.letter_weights =
+        malloc(shipment.letters * sizeof(unsigned long long));
+
+    if (!shipment.package_weights || !shipment.letter_weights)
+        ERR("malloc");
+
+    // Przygotowanie buforow dla readv
+    struct iovec buffers[2];
+
+    buffers[0].iov_base = shipment.package_weights;
+    buffers[0].iov_len =
+        shipment.packages * sizeof(unsigned long long);
+
+    buffers[1].iov_base = shipment.letter_weights;
+    buffers[1].iov_len =
+        shipment.letters * sizeof(unsigned long long);
+
+    size_t expected = buffers[0].iov_len + buffers[1].iov_len;
+
+    // Jeden odczyt do dwoch tablic
+    if (readv(fd, buffers, 2) != (ssize_t)expected)
+        ERR("readv");
+
+    if (close(fd))
+        ERR("close");
+
+    // Sumowanie wszystkich wag
+    unsigned long long total = 0;
+
+    for (unsigned long i = 0; i < shipment.packages; i++)
+        total += shipment.package_weights[i];
+
+    for (unsigned long i = 0; i < shipment.letters; i++)
+        total += shipment.letter_weights[i];
+
+    // Zapis do pliku tekstowego
+    FILE* out;
+
+    if ((out = fopen("waga_total", "w")) == NULL)
+        ERR("fopen");
+
+    if (fprintf(out, "%llu\n", total) < 0)
+        ERR("fprintf");
+
+    if (fclose(out))
+        ERR("fclose");
+
+    // Zwalnianie zaalokowanych tablic
+    free(shipment.package_weights);
+    free(shipment.letter_weights);
+
+    if (chdir(cwd))
+        ERR("chdir");
+}
+
+// ETAP 4 - przeszukiwanie drzewa katalogow
+int walk_points(const char* path,
+                const struct stat* s,
+                int type,
+                struct FTW* f)
+{
+    (void)s;
+
+    if (type == FTW_D)
+    {
+        const char* filename = path + f->base;
+
+        if (strncmp(filename,
+                    POINT_PREFIX,
+                    sizeof(POINT_PREFIX) - 1) == 0)
+        {
+            const char* point =
+                filename + sizeof(POINT_PREFIX) - 1;
+
+            printf("Punkt odbioru: %s\n", point);
+
+            calculate_weights(path);
+        }
+    }
+
+    return 0;
+}
+
+void process_points(const char* path)
+{
+    if (nftw(path, walk_points, MAXFD, FTW_PHYS))
+        ERR("nftw");
+}
+
+// ETAP 1 - obsluga programu
+int main(int argc, char** argv)
+{
+    int m = 0, w = 0, p = 0;
+    char* path = NULL;
+
+    if (argc > 4)
+        usage(argv[0]);
+
+    for (int i = 1; i < argc; i++)
+    {
+        if (strlen(argv[i]) != 1)
+        {
+            fprintf(stderr, "Niepoprawna opcja: %s\n", argv[i]);
+            exit(EXIT_FAILURE);
+        }
+
+        switch (argv[i][0])
+        {
+            case 'm':
+                m = 1;
+                break;
+            case 'w':
+                w = 1;
+                break;
+            case 'p':
+                p = 1;
+                break;
+            default:
+                usage(argv[0]);
+        }
+    }
+
+    if (!m && !w && !p)
+        usage(argv[0]);
+
+    size_t pathbufsize = 0;
+    ssize_t pathsize;
+
+    if ((pathsize = getline(&path, &pathbufsize, stdin)) < 0)
+        ERR("getline");
+
+    if (pathsize > 0 && path[pathsize - 1] == '\n')
+        path[pathsize - 1] = '\0';
+
+    struct stat file_stat;
+
+    if (lstat(path, &file_stat))
+        ERR("lstat");
+
+    if (!S_ISDIR(file_stat.st_mode))
+    {
+        fprintf(stderr, "To nie jest katalog: %s\n", path);
+        free(path);
+        exit(EXIT_FAILURE);
+    }
+
+    printf("Wybrane opcje: ");
+
+    if (m)
+        printf("-m ");
+    if (w)
+        printf("-w ");
+    if (p)
+        printf("-p ");
+
+    printf("\n");
+
+    if (m)
+        print_warehouses(path);
+
+    if (w)
+        calculate_weights(path);
+
+    if (p)
+        process_points(path);
+
+    free(path);
+
+    return EXIT_SUCCESS;
+}
