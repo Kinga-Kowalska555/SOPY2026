@@ -1,0 +1,963 @@
+Nr	Co musisz zrobić w zadaniu?	Główne funkcje
+1	Połączyć dwie ścieżki	malloc, snprintf
+2	Czytać metadane klucz:wartość do struktury	getline, strchr, strdup
+3	Podmieniać dynamiczne pola struktury	strdup, free, char**
+4	Zamieniać wartości na bezpieczne nazwy plików	strndup, strchr
+5	Sprawdzić istnienie i typ pliku	stat, lstat, fstat
+6	Tworzyć katalogi oraz dowiązania symboliczne	mkdir, symlink
+7	Indeksować pliki za pomocą nftw	callback, FTW_F
+8	Wczytywać rekordy binarne	readv, struct iovec
+9	Filtrować katalogi po rozszerzeniu i głębokości	readdir, rekurencja
+10	Obsługiwać wiele opcji i ścieżek	getopt, optarg, optind
+11	Wykorzystywać zmienne środowiskowe	getenv
+12	Usuwać wybrany wpis z pliku tekstowego	getline, rename, unlink
+Wszystkie przykłady zakładają Linux/POSIX.
+Wspólny początek pliku
+Do samodzielnych szablonów możesz używać:
+#define _XOPEN_SOURCE 700
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+#include <unistd.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/uio.h>
+#include <fcntl.h>
+#include <ftw.h>
+#include <limits.h>
+#include <stdint.h>
+
+#define MAXFD 20
+
+#define ERR(source) do { \
+    perror(source); \
+    fprintf(stderr, "%s:%d\n", __FILE__, __LINE__); \
+    exit(EXIT_FAILURE); \
+} while (0)
+
+
+Jeśli zadanie dostarcza common.h, użyj jego definicji zamiast kopiować ten blok.
+
+1. join_paths() — łączenie dwóch ścieżek
+Bardzo często potrzebujesz stworzyć ścieżkę:
+library/fantasy/book.txt
+
+
+mając osobno katalog i nazwę pliku.
+
+char* join_paths(const char* path1, const char* path2)
+{
+    size_t l1 = strlen(path1);
+    size_t l2 = strlen(path2);
+
+    int slash = (l1 > 0 && path1[l1 - 1] != '/');
+
+    if (l1 > SIZE_MAX - l2 - (size_t)slash - 1)
+        ERR("path too long");
+
+    char* result = malloc(l1 + l2 + slash + 1);
+
+    if (result == NULL)
+        ERR("malloc");
+
+    memcpy(result, path1, l1);
+
+    if (slash)
+        result[l1++] = '/';
+
+    memcpy(result + l1, path2, l2 + 1);
+
+    return result;
+}
+
+
+
+Użycie:
+char* path = join_paths("library/fantasy", "book.txt");
+
+printf("%s\n", path);
+
+free(path);
+
+
+W pamięci malloc() tworzy nowy bufor. Funkcja zwraca jego adres. Musisz wykonać free(path).
+Zwróć uwagę na memcpy(..., l2 + 1): dodatkowy bajt kopiuje też końcowy '\0'.
+
+2. Dynamiczna struktura i jej zwalnianie
+To dokładnie typ struktury, który występuje w Twoim zadaniu z książkami.
+typedef struct {
+    char* author;
+    char* title;
+    char* genre;
+} book_t;
+
+
+Pola nie są tablicami znaków, tylko wskaźnikami. Każde może wskazywać na osobny blok pamięci.
+
+void init_book(book_t* book)
+{
+    book->author = NULL;
+    book->title = NULL;
+    book->genre = NULL;
+}
+
+void free_book(book_t* book)
+{
+    free(book->author);
+    free(book->title);
+    free(book->genre);
+
+    book->author = NULL;
+    book->title = NULL;
+    book->genre = NULL;
+}
+
+
+
+Przykład:
+book_t book;
+
+init_book(&book);
+
+/* wczytywanie danych */
+
+free_book(&book);
+
+
+Tutaj nie wykonujemy free(book), ponieważ book jest zwykłą strukturą lokalną.
+Zwalniamy jedynie dynamiczne bloki, na które wskazują jej pola.
+3. set_field() — bezpieczna podmiana pola struktury
+Ten szablon jest szczególnie użyteczny, gdy w pliku mogą powtarzać się wartości, a nowsza ma zastępować starszą.
+
+void set_field(char** field, const char* value)
+{
+    char* copy = strdup(value);
+
+    if (copy == NULL)
+        ERR("strdup");
+
+    free(*field);
+
+    *field = copy;
+}
+
+
+
+Przykład:
+book_t book = {0};
+
+set_field(&book.title, "Pierwszy tytul");
+set_field(&book.title, "Nowy tytul");
+
+printf("%s\n", book.title);
+
+free_book(&book);
+
+
+Wynik:
+Nowy tytul
+
+
+Co dzieje się w RAM?
+Podmiana dynamicznego pola
+Przed drugim set_field()book.title → "Pierwszy tytul"
+
+strdup() tworzy nowy napis
+
+copy → "Nowy tytul"
+book.title → "Pierwszy tytul"
+
+free(*field), potem *field = copy
+
+Po set_field()book.title → "Nowy tytul"
+
+
+Przekazujemy &book.title, ponieważ funkcja ma zmienić sam wskaźnik przechowywany w strukturze.
+
+4. read_metadata() — parsowanie pliku klucz:wartość
+To jeden z najbardziej uniwersalnych szablonów z Twoich przykładów.
+Plik:
+author:Adam Mickiewicz
+title:Pan Tadeusz
+genre:epopeja
+
+
+
+int read_metadata(const char* path, book_t* book)
+{
+    FILE* f = fopen(path, "r");
+
+    if (f == NULL)
+        return -1;
+
+    init_book(book);
+
+    char* line = NULL;
+    size_t capacity = 0;
+    ssize_t n;
+
+    while ((n = getline(&line, &capacity, f)) != -1)
+    {
+        // Usuwamy koniec linii
+        if (n > 0 && line[n - 1] == '\n')
+            line[--n] = '\0';
+
+        if (n > 0 && line[n - 1] == '\r')
+            line[--n] = '\0';
+
+        // Szukamy separatora
+        char* sep = strchr(line, ':');
+
+        if (sep == NULL)
+            continue;
+
+        // Dzielimy napis na dwie czesci
+        *sep = '\0';
+
+        char* key = line;
+        char* value = sep + 1;
+
+        // Dopasowanie nazwy pola
+        if (strcmp(key, "author") == 0)
+            set_field(&book->author, value);
+
+        else if (strcmp(key, "title") == 0)
+            set_field(&book->title, value);
+
+        else if (strcmp(key, "genre") == 0)
+            set_field(&book->genre, value);
+    }
+
+    if (ferror(f))
+        ERR("getline");
+
+    free(line);
+
+    if (fclose(f))
+        ERR("fclose");
+
+    return 0;
+}
+
+
+
+Użycie:
+book_t book = {0};
+
+if (read_metadata("library/book.txt", &book) != 0)
+    ERR("fopen");
+
+printf("Autor: %s\n", book.author ? book.author : "brak");
+printf("Tytul: %s\n", book.title ? book.title : "brak");
+
+free_book(&book);
+
+
+Najważniejszy fragment do zapamiętania
+char* sep = strchr(line, ':');
+
+if (sep == NULL)
+    continue;
+
+*sep = '\0';
+
+char* key = line;
+char* value = sep + 1;
+
+
+Przed:
+author:Adam Mickiewicz\0
+
+
+Po:
+author\0Adam Mickiewicz\0
+
+
+Powstają dwa wskaźniki do różnych miejsc tej samej tablicy.
+strchr() nie alokuje pamięci. Dopiero strdup() wywoływane przez set_field() tworzy niezależny napis, który pozostanie dostępny po kolejnym getline().
+
+5. make_name() — zamiana tekstu na nazwę pliku
+W zadaniach z indeksowaniem często musisz zamienić tytuł lub kategorię na nazwę katalogu albo dowiązania.
+
+char* make_name(const char* value)
+{
+    if (value == NULL)
+        return NULL;
+
+    char* name = strndup(value, 64);
+
+    if (name == NULL)
+        ERR("strndup");
+
+    for (char* p = name; *p != '\0'; p++)
+    {
+        if (*p == '/')
+            *p = '_';
+    }
+
+    if (strcmp(name, "") == 0 ||
+        strcmp(name, ".") == 0 ||
+        strcmp(name, "..") == 0)
+    {
+        free(name);
+        return NULL;
+    }
+
+    return name;
+}
+
+
+
+Przykład:
+char* name = make_name("Fantasy/Przygoda");
+
+if (name != NULL)
+{
+    printf("%s\n", name);
+    free(name);
+}
+
+
+Wynik:
+Fantasy_Przygoda
+
+
+Funkcja:
+- tworzy nowy napis na stercie,
+- kopiuje maksymalnie 64 bajty,
+- zastępuje ukośniki znakami _,
+- odrzuca nazwy puste, . i ...
+Zwrócony wskaźnik trzeba zwolnić przez free().
+
+6. stat(), lstat() i fstat() — sprawdzanie plików
+W tych zadaniach bardzo często musisz sprawdzić, czy obiekt jest zwykłym plikiem, katalogiem albo dowiązaniem symbolicznym.
+
+void check_path(const char* path)
+{
+    struct stat st;
+
+    if (lstat(path, &st) < 0)
+        ERR("lstat");
+
+    if (S_ISDIR(st.st_mode))
+        printf("Katalog\n");
+
+    else if (S_ISREG(st.st_mode))
+        printf("Zwykly plik\n");
+
+    else if (S_ISLNK(st.st_mode))
+        printf("Dowiazanie symboliczne\n");
+
+    printf("Rozmiar: %lld bajtow\n",
+           (long long)st.st_size);
+}
+
+
+
+Najważniejsza różnica:
+Funkcja	Co sprawdza?
+stat(path, &st)	Obiekt docelowy; podąża za symlinkiem
+lstat(path, &st)	Sam symlink, jeśli ścieżka jest dowiązaniem
+fstat(fd, &st)	Plik już otwarty przez open()
+Szablon: czy plik istnieje?
+struct stat st;
+
+if (stat(path, &st) == 0)
+{
+    printf("Istnieje\n");
+}
+else if (errno == ENOENT)
+{
+    printf("Nie istnieje\n");
+}
+else
+{
+    ERR("stat");
+}
+
+
+Szablon: czy dowiązanie symboliczne wskazuje na istniejący plik?
+struct stat st;
+
+if (stat(link_path, &st) == 0)
+{
+    printf("Cel istnieje\n");
+}
+else if (errno == ENOENT)
+{
+    printf("Cel nie istnieje lub sciezka jest niepoprawna\n");
+}
+else
+{
+    ERR("stat");
+}
+
+
+To szczególnie przydatne do sprawdzania poprawności indeksów utworzonych za pomocą symlink().
+
+7. Tworzenie katalogów przez mkdir()
+W Twoich zadaniach często najpierw trzeba utworzyć strukturę indeksu:
+index/
+├── by-title/
+├── by-author/
+└── by-genre/
+
+
+Przydatny szablon:
+
+void make_directory(const char* path)
+{
+    if (mkdir(path, 0755) < 0)
+    {
+        if (errno != EEXIST)
+            ERR("mkdir");
+
+        struct stat st;
+
+        if (stat(path, &st) < 0)
+            ERR("stat");
+
+        if (!S_ISDIR(st.st_mode))
+        {
+            fprintf(stderr, "Sciezka istnieje, ale nie jest katalogiem\n");
+            exit(EXIT_FAILURE);
+        }
+    }
+}
+
+
+
+Wywołanie:
+make_directory("index");
+make_directory("index/by-title");
+make_directory("index/by-author");
+make_directory("index/by-genre");
+
+
+Ważne: katalog nadrzędny musi już istnieć. Dlatego najpierw tworzymy index, a później jego podkatalogi.
+Ten wariant toleruje katalog, który już istnieje. Jeśli treść zadania wymaga błędu przy ponownym uruchomieniu programu, zamiast tego użyj zwykłego mkdir() z kontrolą błędu.
+
+8. symlink() — tworzenie dowiązań symbolicznych
+To bardzo charakterystyczny element zadań, które przesłałaś.
+Załóżmy, że mamy plik:
+library/fantasy/book1.txt
+
+
+Chcemy utworzyć dowiązanie:
+index/by-title/book1.txt
+
+
+wskazujące na oryginalny plik.
+Uniwersalna funkcja
+Wykorzystujemy join_paths() z szablonu 1.
+
+void make_link(const char* directory,
+               const char* name,
+               const char* target)
+{
+    char* link_path = join_paths(directory, name);
+
+    if (symlink(target, link_path) < 0)
+    {
+        if (errno == EEXIST)
+            fprintf(stderr, "Dowiazanie juz istnieje: %s\n",
+                    link_path);
+
+        ERR("symlink");
+    }
+
+    free(link_path);
+}
+
+
+
+Użycie:
+make_link("index/by-title",
+          "book1.txt",
+          "../../library/fantasy/book1.txt");
+
+
+Jak działa dowiązanie symboliczne
+index/by-title/book1.txt
+
+Dowiązanie zawiera ścieżkę do celu
+
+../../library/fantasy/book1.txt
+
+library/fantasy/book1.txt
+
+Oryginalny plik z danymi
+
+
+Najważniejsza pułapka
+symlink(target, link_path);
+
+
+Pierwszy argument to tekst ścieżki celu, drugi to miejsce, gdzie tworzymy dowiązanie.
+W przypadku względnego target ścieżka jest interpretowana względem katalogu zawierającego dowiązanie, a nie względem katalogu, z którego uruchomiono program.
+Dlatego liczba ../ musi być poprawnie obliczona.
+
+9. nftw() — indeksowanie wszystkich zwykłych plików
+To niemal dokładnie schemat z Twojego zadania z książkami.
+Funkcja przechodzi rekurencyjnie przez library, a dla każdego zwykłego pliku tworzy dowiązanie w index/by-title.
+Zakładamy, że make_link() i katalog index/by-title już istnieją.
+
+int index_file(const char* path,
+               const struct stat* st,
+               int type,
+               struct FTW* f)
+{
+    (void)st;
+
+    if (type != FTW_F)
+        return 0;
+
+    // Sama nazwa pliku, bez katalogow
+    const char* name = path + f->base;
+
+    // Sciezka wzgledna od index/by-title
+    char* target = join_paths("../..", path);
+
+    make_link("index/by-title", name, target);
+
+    free(target);
+
+    return 0;
+}
+
+void create_index(void)
+{
+    make_directory("index");
+    make_directory("index/by-title");
+
+    if (nftw("library", index_file, 20, FTW_PHYS) != 0)
+        ERR("nftw");
+}
+
+
+
+Przykładowe wywołanie:
+create_index();
+
+
+Tutaj nftw() przekazuje do callbacku cztery informacje:
+- path — ścieżka odwiedzonego obiektu.
+- st — wskaźnik do struktury stat.
+- type — rodzaj obiektu, np. FTW_F lub FTW_D.
+- f — dodatkowe informacje, w tym f->base.
+path + f->base wskazuje na samą nazwę pliku. Nie tworzy kopii napisu.
+Ten szablon zakłada, że library jest ścieżką względną względem katalogu roboczego i że indeks ma wskazaną strukturę. Przy jednakowych nazwach plików z różnych katalogów wystąpi konflikt nazw dowiązań — musisz wtedy zastosować zasadę wymaganą przez zadanie.
+
+10. readv() — odczyt rekordów binarnych zawierających różne typy
+To kolejny bardzo ważny szablon.
+W Twoim przykładzie rekord bazy danych składa się z:
+- 4-bajtowego rozmiaru,
+- 64 bajtów tytułu.
+Takie rekordy są zapisane jeden po drugim.
+
+typedef struct {
+    unsigned int size;
+    char title[65];
+} db_entry_t;
+
+void read_database(const char* path)
+{
+    int fd = open(path, O_RDONLY);
+
+    if (fd < 0)
+        ERR("open");
+
+    struct stat st;
+
+    if (fstat(fd, &st) < 0)
+        ERR("fstat");
+
+    db_entry_t entry;
+
+    struct iovec iov[2];
+
+    iov[0].iov_base = &entry.size;
+    iov[0].iov_len = sizeof(entry.size);
+
+    iov[1].iov_base = entry.title;
+    iov[1].iov_len = 64;
+
+    size_t entry_size = sizeof(entry.size) + 64;
+
+    if (st.st_size < 0 ||
+        st.st_size % (off_t)entry_size != 0)
+    {
+        fprintf(stderr, "Niepoprawny rozmiar bazy\n");
+        exit(EXIT_FAILURE);
+    }
+
+    off_t count = st.st_size / (off_t)entry_size;
+
+    entry.title[64] = '\0';
+
+    for (off_t i = 0; i < count; i++)
+    {
+        ssize_t n = readv(fd, iov, 2);
+
+        if (n < 0 || (size_t)n != entry_size)
+            ERR("readv");
+
+        printf("Tytul: %s\n", entry.title);
+        printf("Rozmiar: %u\n", entry.size);
+    }
+
+    if (close(fd) < 0)
+        ERR("close");
+}
+
+
+
+Użycie:
+read_database("database.bin");
+
+
+Co dzieje się w pamięci?
+Jeden rekord — dwa obszary docelowe
+Rekord w pliku binarnymsize — 4 B
+
+title — 64 B
+
+
+
+
+iov[0]
+&entry.size
+Odczyt 4 bajtów
+
+iov[1]
+entry.title
+Odczyt 64 bajtów
+
+
+
+Zauważ:
+iov[0].iov_base = &entry.size;
+
+
+Używamy &, bo size jest pojedynczą zmienną.
+Natomiast:
+iov[1].iov_base = entry.title;
+
+
+Nie używamy &, bo title jest tablicą, która w tym wyrażeniu zamienia się na wskaźnik do pierwszego znaku.
+entry.title[64] = '\0' zapewnia terminator na końcu dodatkowego bajtu tablicy.
+Uwaga: szablon zakłada odpowiedni format binarny i pojedynczy pełny odczyt rekordu. Krótszy odczyt jest tutaj traktowany jako błąd.
+
+11. getopt() — wiele opcji, wielokrotne -p, filtr i głębokość
+To szablon bardzo podobny do zadania, które przesłałaś z opcjami:
+./program -p data -p library -e txt -d 3 -o wynik.txt
+
+
+Znaczenie:
+- -p — katalog; można podać kilka razy,
+- -e — rozszerzenie plików,
+- -d — maksymalna głębokość,
+- -o — nazwa pliku wynikowego.
+
+int main(int argc, char** argv)
+{
+    char** paths = malloc((size_t)argc * sizeof(char*));
+
+    if (paths == NULL)
+        ERR("malloc");
+
+    int path_count = 0;
+    char* extension = NULL;
+    char* output = NULL;
+    long depth = 1;
+    int opt;
+
+    while ((opt = getopt(argc, argv, "p:e:d:o:")) != -1)
+    {
+        switch (opt)
+        {
+            case 'p':
+                paths[path_count++] = optarg;
+                break;
+
+            case 'e':
+                extension = optarg;
+                break;
+
+            case 'd':
+            {
+                char* end;
+                errno = 0;
+
+                depth = strtol(optarg, &end, 10);
+
+                if (errno == ERANGE ||
+                    end == optarg ||
+                    *end != '\0' ||
+                    depth < 1)
+                {
+                    fprintf(stderr, "Zla glebokosc\n");
+                    exit(EXIT_FAILURE);
+                }
+                break;
+            }
+
+            case 'o':
+                output = optarg;
+                break;
+
+            default:
+                fprintf(stderr, "Zla opcja\n");
+                exit(EXIT_FAILURE);
+        }
+    }
+
+    if (optind < argc)
+    {
+        fprintf(stderr, "Nadmiarowe argumenty\n");
+        exit(EXIT_FAILURE);
+    }
+
+    if (path_count == 0)
+        paths[path_count++] = ".";
+
+    FILE* out = stdout;
+
+    if (output != NULL)
+    {
+        out = fopen(output, "w");
+        if (out == NULL)
+            ERR("fopen");
+    }
+
+    for (int i = 0; i < path_count; i++)
+    {
+        fprintf(out, "Katalog: %s\n", paths[i]);
+
+        // Tutaj wywolaj swoja funkcje:
+        // scan_dir(paths[i], depth, extension, out);
+    }
+
+    if (out != stdout && fclose(out))
+        ERR("fclose");
+
+    free(paths);
+
+    return EXIT_SUCCESS;
+}
+
+
+
+Jak rozumieć napis "p:e:d:o:"?
+Dwukropek oznacza, że opcja wymaga argumentu.
+Zapis	Przykładowe użycie
+"p:"	-p data
+"e:"	-e txt
+"d:"	-d 3
+"o:"	-o wynik.txt
+"p:e:d:o"	-o jest flagą bez argumentu
+Właśnie tę ostatnią różnicę musisz sprawdzać w treści zadania.
+Ważne pamięciowo: optarg wskazuje na argument programu. Nie trzeba wykonywać free(optarg).
+Tak samo tablica paths jest dynamiczna, ale przechowuje tylko adresy napisów z argv. Dlatego na końcu robisz:
+free(paths);
+
+
+a nie osobne free(paths[i]).
+
+12. getenv() — pobieranie zmiennej środowiskowej
+Niektóre zadania wymagają pobrania nazwy pliku lub katalogu ze zmiennej środowiskowej.
+Przykład terminalowy:
+export L1_OUTPUTFILE=wynik.txt
+./program -o
+
+
+Kod:
+
+FILE* open_output_from_env(void)
+{
+    char* name = getenv("L1_OUTPUTFILE");
+
+    if (name == NULL)
+        return stdout;
+
+    FILE* out = fopen(name, "w");
+
+    if (out == NULL)
+        ERR("fopen");
+
+    return out;
+}
+
+
+
+Przykład użycia:
+FILE* out = open_output_from_env();
+
+fprintf(out, "Wynik programu\n");
+
+if (out != stdout && fclose(out) != 0)
+    ERR("fclose");
+
+
+getenv() zwraca wskaźnik do napisu zarządzanego przez środowisko procesu. Nie wykonuj free() na tym wskaźniku.
+Jeśli zmienna nie istnieje, getenv() zwraca NULL.
+
+13. Usuwanie wpisu z pliku tekstowego przez plik tymczasowy
+Ten schemat jest bardzo przydatny w zadaniach z listami pakietów, pracowników, książek i rekordów.
+Załóżmy, że plik requirements zawiera:
+numpy 2.0
+pandas 2.2
+requests 2.31
+
+
+Chcemy usunąć wpis pandas.
+Najbezpieczniejszy prosty schemat polega na:
+1. Otworzeniu oryginalnego pliku.
+2. Utworzeniu nowego pliku tymczasowego.
+3. Przepisaniu wszystkich wierszy z wyjątkiem wybranego.
+4. Zamknięciu plików.
+5. Zastąpieniu oryginalnego pliku tymczasowym.
+
+void remove_entry(const char* path, const char* name)
+{
+    char* tmp = malloc(strlen(path) + 5);
+
+    if (tmp == NULL)
+        ERR("malloc");
+
+    sprintf(tmp, "%s.tmp", path);
+
+    FILE* in = fopen(path, "r");
+    if (in == NULL)
+        ERR("fopen input");
+
+    FILE* out = fopen(tmp, "w");
+    if (out == NULL)
+        ERR("fopen output");
+
+    char* line = NULL;
+    size_t capacity = 0;
+
+    size_t name_len = strlen(name);
+
+    while (getline(&line, &capacity, in) != -1)
+    {
+        // Sprawdzamy, czy linia zaczyna sie
+        // od nazwy oraz spacji
+        int match =
+            strncmp(line, name, name_len) == 0 &&
+            line[name_len] == ' ';
+
+        if (!match)
+        {
+            if (fputs(line, out) == EOF)
+                ERR("fputs");
+        }
+    }
+
+    if (ferror(in))
+        ERR("getline");
+
+    free(line);
+
+    if (fclose(in))
+        ERR("fclose input");
+
+    if (fclose(out))
+        ERR("fclose output");
+
+    if (rename(tmp, path) < 0)
+        ERR("rename");
+
+    free(tmp);
+}
+
+
+
+Przykład:
+remove_entry("requirements", "pandas");
+
+
+Wynik:
+numpy 2.0
+requests 2.31
+
+
+Na co uważać: to dydaktyczna wersja. Plik tymczasowy path.tmp może już istnieć, a rename() zastępuje docelowy plik. W poważniejszym programie warto stosować mkstemp(), zadbać o uprawnienia i o sprzątanie podczas błędów.
+
+14. Uniwersalny schemat całego zadania
+Właśnie tak można połączyć funkcje z Twoich przykładów z książkami, bazą danych i indeksowaniem.
+int main(int argc, char** argv)
+{
+    // 1. Sprawdzenie argc, argv lub getopt()
+
+    // 2. Utworzenie katalogow
+    make_directory("index");
+    make_directory("index/by-title");
+    make_directory("index/by-genre");
+
+    // 3. Przejscie po wszystkich plikach biblioteki
+    if (nftw("library", index_file, MAXFD, FTW_PHYS))
+        ERR("nftw");
+
+    // 4. Opcjonalne sprawdzenie bazy binarnej
+    if (argc == 2)
+        read_database(argv[1]);
+
+    return EXIT_SUCCESS;
+}
+
+
+W bardziej rozbudowanej wersji callback index_file() wykonuje:
+// 1. Sprawdz, czy znaleziono zwykly plik
+// 2. Wczytaj jego metadane
+// 3. Stworz bezpieczna nazwe
+// 4. Utworz odpowiedni katalog indeksu
+// 5. Utworz dowiazanie symboliczne
+// 6. Zwolnij dynamiczne pola struktury
+// 7. Zwroc 0, aby nftw kontynuowalo prace
+
+
+To jest jeden z najbardziej uniwersalnych schematów na laboratoria tego rodzaju.
+
+15. Co skopiować w konkretnej sytuacji?
+Wybierz rodzaj zadania
+Mam pliki z informacjami author:title:genre
+
+Muszę zrobić indeks plików i dowiązania symboliczne
+
+Mam binarną bazę: rozmiar + 64 bajty tytułu
+
+Mam opcje -p, -e, -d oraz -o
+
+Muszę zapisać raport do pliku ze zmiennej środowiskowej
+
+Mam usunąć konkretny wpis z pliku
+
+
+read_metadata() + set_field() + free_book()
+Szablony 2–4
+
+16. Najważniejsza ściąga pamięciowa
+Funkcja	Co otrzymujesz?	Czy zwalniasz pamięć?
+malloc()	Nowy blok pamięci	free()
+strdup()	Nową kopię napisu	free()
+strndup()	Nową kopię części napisu	free()
+strchr()	Wskaźnik do oryginalnego napisu	Nie
+strstr()	Wskaźnik do oryginalnego napisu	Nie
+getenv()	Wskaźnik do danych środowiska	Nie
+readdir()	Wskaźnik do wpisu katalogowego	Nie — closedir()
+getline()	Bufor dynamiczny, jeśli sama go alokuje	free()
+opendir()	Otwarty strumień katalogowy	closedir()
+fopen()	Otwarty strumień plikowy	fclose()
+open()	Deskryptor pliku (int)	close()
+Trzy pułapki z Twoich przykładów
+1. errno i readdir()
+Nie wystarczy wyzerować errno tylko raz przed całą pętlą, jeśli wewnątrz są wykonywane inne funkcje systemowe. Najbezpieczniej przed każdym wywołaniem readdir() ustawić errno = 0, a po otrzymaniu NULL sprawdzić jego wartość.
+2. errno i getline()
+Po zakończeniu czytania pliku najprościej użyć ferror(f). Samo errno może mieć wartość ustawioną przez inną operację wykonaną w pętli.
+3. Ścieżki względne w symlink()
+Dowiązanie znajdujące się w index/by-genre/fantasy/ wymaga innej liczby ../ niż dowiązanie w index/by-title/. Te ścieżki zawsze licz od katalogu, w którym znajduje się dowiązanie.
