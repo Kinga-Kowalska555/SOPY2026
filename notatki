@@ -1,0 +1,920 @@
+//OPENDIR
+DIR* opendir(const char* dirname);
+
+DIR* dirp;
+
+if ((dirp = opendir(".")) == NULL)
+ERR("opendir");
+
+#include <stdio.h>
+#include <dirent.h>
+
+
+// przy statycznej tablicy znaków bez malloca
+int main(void)
+{
+    char sciezka[256];
+
+    printf("Podaj sciezke do katalogu: ");
+    if (fgets(sciezka, sizeof(sciezka), stdin) == NULL)
+        return 1;
+
+    sciezka[strcspn(sciezka, "\n")] = '\0';
+
+    DIR* dirp;
+
+    if ((dirp = opendir(sciezka)) == NULL) {
+        perror("opendir");
+        return 1;
+    }
+
+    printf("Katalog otwarty poprawnie!\n");
+
+    closedir(dirp);
+    return 0;
+}
+
+#include <stdio.h>
+#include <dirent.h>
+
+int main(int argc, char* argv[])
+{
+    if (argc != 2) {
+        fprintf(stderr, "Uzycie: %s KATALOG\n", argv[0]);
+        return 1;
+    }
+
+    DIR* dirp = opendir(argv[1]);
+
+    if (dirp == NULL) {
+        perror("opendir");
+        return 1;
+    }
+
+    printf("Katalog otwarty poprawnie!\n");
+
+    closedir(dirp);
+    return 0;
+}
+
+// READDIR
+struct dirent* readdir(DIR* dirp);
+
+// ino_t  d_ino->identyfikator pliku(numer inode, więcej w man 7 inode)
+// char   d_name[]->nazwa pliku
+
+#include <stdio.h>
+#include <dirent.h>
+
+int main(void)
+{
+    DIR* dirp;
+    struct dirent* wpis;
+
+    dirp = opendir(".");
+
+    if (dirp == NULL) {
+        perror("opendir");
+        return 1;
+    }
+
+    while ((wpis = readdir(dirp)) != NULL) {
+        printf("%s\n", wpis->d_name);
+    }
+
+    closedir(dirp);
+
+    return 0;
+}
+
+//STAT LSTAT
+
+int  stat(const char* restrict path, struct stat* restrict buf); // sukces 0 inna wartosc blad    przy symlinku zwroci dane pliku na ktory symlink wskazuje
+int lstat(const char* restrict path, struct stat* restrict buf); // sukces zero inna wartosc blad   przy symlinku zwroci dne symlinka
+
+#include <stdio.h>
+#include <sys/stat.h>
+#include <stdint.h>
+#include <inttypes.h>
+
+int main(void)
+{
+    struct stat info;
+
+    if (stat("kot.txt", &info) != 0) {
+        perror("stat");
+        return 1;
+    }
+
+    printf("Inode: %ju\n", (uintmax_t)info.st_ino);
+    printf("Rozmiar: %jd bajtow\n", (intmax_t)info.st_size);
+    printf("UID: %ju\n", (uintmax_t)info.st_uid);
+    printf("Liczba dowiazan: %ju\n",
+        (uintmax_t)info.st_nlink);
+
+    if (S_ISREG(info.st_mode))
+        printf("To zwykly plik\n");
+
+    if (S_ISDIR(info.st_mode))
+        printf("To katalog\n");
+
+    return 0;
+}
+
+// CLOSEDIR
+
+//GETCWD
+char* getcwd(char* buf, size_t size);  // zapisuje biezacy katalog jako sciezke BEZWZGLEDNA i wynikiem tego jest wskaznik na pocztek buf
+
+#include <stdio.h>
+#include <unistd.h>
+
+int main(void)
+{
+    char buf[1024];
+
+    // 1. Sprawdzamy, gdzie jestesmy
+    if (getcwd(buf, sizeof(buf)) == NULL) {
+        perror("getcwd");
+        return 1;
+    }
+
+    printf("PRZED: %s\n", buf);
+
+    // 2. Zmieniamy katalog
+    if (chdir("..") == -1) {
+        perror("chdir");
+        return 1;
+    }
+
+    // 3. Sprawdzamy ponownie
+    if (getcwd(buf, sizeof(buf)) == NULL) {
+        perror("getcwd");
+        return 1;
+    }
+
+    printf("PO: %s\n", buf);
+
+    return 0;
+}
+
+//CHDIR
+int chdir(const char* path); // zminia katalog roboczy (path moze byc wzledne albo bezwzgledne)
+
+
+// GLUPIEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE
+#define _POSIX_C_SOURCE 200809L
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <errno.h>
+#include <string.h>
+
+int main(void)
+{
+    char* path = NULL;
+    size_t path_size = 0;
+
+    // 1. Uzytkownik wpisuje sciezke
+    printf("Podaj sciezke: ");
+
+    ssize_t n = getline(&path, &path_size, stdin);
+
+    if (n == -1) {
+        perror("getline");
+        free(path);
+        return 1;
+    }
+
+    // Usuwamy znak nowej linii
+    if (n > 0 && path[n - 1] == '\n')
+        path[n - 1] = '\0';
+
+    // 2. Zmieniamy katalog roboczy
+    if (chdir(path) == -1) {
+        perror("chdir");
+        free(path);
+        return 1;
+    }
+
+    // 3. Dynamicznie alokujemy bufor
+    size_t size = 128;
+    char* buf = malloc(size);
+
+    if (buf == NULL) {
+        perror("malloc");
+        free(path);
+        return 1;
+    }
+
+    // 4. Pobieramy aktualna sciezke
+    while (getcwd(buf, size) == NULL) {
+
+        if (errno != ERANGE) {
+            perror("getcwd");
+            free(buf);
+            free(path);
+            return 1;
+        }
+
+        size *= 2;
+
+        char* temp = realloc(buf, size);
+
+        if (temp == NULL) {
+            perror("realloc");
+            free(buf);
+            free(path);
+            return 1;
+        }
+
+        buf = temp;
+    }
+
+    printf("Aktualny katalog: %s\n", buf);
+
+    // 5. Zwalniamy pamiec
+    free(buf);
+    free(path);
+
+    return 0;
+}
+//-------------------------------------------------------------------------------------------------------------------------------------------------------
+for (int i = 1; i < argc; i++)
+{
+    if (chdir(argv[i]) == -1)
+    {
+        if (errno == ENOENT)
+        {
+            fprintf(stderr, "Katalog %s nie istnieje!\n", argv[i]);
+            continue;
+        }
+        else if (errno == EACCES)
+        {
+            fprintf(stderr, "Brak uprawnien do katalogu %s!\n", argv[i]);
+            continue;
+        }
+        else
+        {
+            ERR("chdir");
+        }
+    }
+
+    printf("%s:\n", argv[i]);
+    scan_dir();
+
+    if (chdir(path) == -1)
+        ERR("chdir");
+}
+
+//FOPEN
+
+FILE* fopen(const char* restrict pathname, const char* restrict mode);
+
+// r - plik udostepnia czytanie danych i musi juz istniec wczsniej
+//w - zawartosc pliku czyszczona i dopisujemy sobie rzeczy do pustego pliku a jelsi plik jescze nie istnieje to go sobie tworzymy
+// a - dopisywanie danych do juz istniejacej zawartosci albo tworzy plik i dane trafiaja na konniec pliku nawet jesli chcemy zmienic przez fseek
+// + zarówno odczytywanie jak i zapisywanie danych
+
+r i r + — plik musi istnieć.Plus dodaje zapis.
+w i w + — plik jest tworzony lub czyszczony.Plus dodaje odczyt.
+a i a + — zapisujemy na końcu.Plus dodaje odczyt.
+
+// FSEEK
+
+int fseek(FILE* stream, long offset, int whence); // 0 przy sukcesie
+
+SEEK_SET - punktem odniesienia jest początek pliku, funkcja ustawia kursor pliku na offset - ym bajcie pliku.
+SEEK_CUR - przesunięcie relatywne do obecnego kursora pliku, funkcja ustawia kursor o offset bajtów do przodu(do tyłu w przypadku wartości ujemnej).
+SEEK_END - punktem odniesienia jest koniec pliku.Kursor pliku będzie wskazywał na dane tylko jeśli wartość offset jest ujemna.
+
+// FTELL
+
+long ftell(FILE* stream); // funkcja zwraca aktualną pozycje strumienia; przy bledzie -1L
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+
+int main(int argc, char* argv[])
+{
+    if (argc != 2) {
+        fprintf(stderr, "Uzycie: %s PLIK\n", argv[0]);
+        return EXIT_FAILURE;
+    }
+
+    // 1. Otwieramy plik
+    FILE* plik = fopen(argv[1], "rb");
+
+    if (plik == NULL) {
+        perror("fopen");
+        return EXIT_FAILURE;
+    }
+
+    // 2. Przechodzimy na koniec pliku
+    if (fseek(plik, 0, SEEK_END) != 0) {
+        perror("fseek");
+        fclose(plik);
+        return EXIT_FAILURE;
+    }
+
+    // 3. Sprawdzamy rozmiar
+    long rozmiar = ftell(plik);
+
+    if (rozmiar < 0) {
+        perror("ftell");
+        fclose(plik);
+        return EXIT_FAILURE;
+    }
+
+    // 4. Alokujemy pamiec (+1 na '\0')
+    if ((uintmax_t)rozmiar >= SIZE_MAX) {
+        fprintf(stderr, "Plik jest za duzy\n");
+        fclose(plik);
+        return EXIT_FAILURE;
+    }
+
+    size_t n = (size_t)rozmiar;
+    char* buf = malloc(n + 1);
+
+    if (buf == NULL) {
+        perror("malloc");
+        fclose(plik);
+        return EXIT_FAILURE;
+    }
+
+    // 5. Wracamy na poczatek
+    if (fseek(plik, 0, SEEK_SET) != 0) {
+        perror("fseek");
+        free(buf);
+        fclose(plik);
+        return EXIT_FAILURE;
+    }
+
+    // 6. Odczytujemy caly plik
+    size_t odczytane = fread(buf, 1, n, plik);
+
+    if (odczytane != n) {
+        fprintf(stderr, "Nie udalo sie odczytac calego pliku\n");
+        free(buf);
+        fclose(plik);
+        return EXIT_FAILURE;
+    }
+
+    // 7. Dodajemy koniec napisu
+    buf[odczytane] = '\0';
+
+    // 8. Wypisujemy zawartosc
+    printf("Rozmiar: %zu bajtow\n", n);
+    printf("Zawartosc:\n%s\n", buf);
+
+    // 9. Sprzatamy
+    free(buf);
+
+    if (fclose(plik) == EOF) {
+        perror("fclose");
+        return EXIT_FAILURE;
+    }
+
+    return EXIT_SUCCESS;
+}
+
+//FSCANF
+
+fscanf(plik, "%d", &liczba);
+
+
+Funkcja fscanf() odczytuje dane tekstowe i interpretuje je zgodnie z podanym formatem.
+
+//FREAD
+
+size_t fread(void* restrict ptr, size_t size, size_t nitems, FILE* restrict stream); //Zwrócona wartość oznacza liczbę elementów wczytanych z sukcesem jelsi <nitems to blad
+
+ptr - bufor w który będą zapisywane dane,
+size - rozmiar nieprzerwanych elementów do wczytania,
+nitems - liczba elementów do wczytania,
+stream - wskaźnik pozyskany z fopen.
+
+
+fread() nie interpretuje danych.
+Odczytuje po prostu bajty z pliku i kopiuje je do pamięci RAM.
+Na przykład :
+char buf[4];
+
+fread(buf, 1, 3, plik);
+
+
+Jeśli plik zawiera tekst 123, w pamięci otrzymamy :
+buf[0] = '1'
+buf[1] = '2'
+buf[2] = '3'
+
+
+Ważne : fread() nie doda automatycznie '\0' na końcu.Jeżeli chcemy potraktować dane jako napis, musimy zrobić to samodzielnie.
+
+feof(plik);
+ferror(plik);
+
+
+-feof() — sprawdza, czy strumień osiągnął stan końca pliku.
+- ferror() — sprawdza, czy wystąpił błąd operacji na strumieniu.
+
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(void)
+{
+    FILE* plik = fopen("kot.txt", "rb");
+
+    if (plik == NULL) {
+        perror("fopen");
+        return EXIT_FAILURE;
+    }
+
+    char buf[100];
+    size_t n;
+
+    while ((n = fread(buf, 1, sizeof(buf), plik)) > 0)
+    {
+        // Wypisujemy dokladnie tyle bajtow,
+        // ile fread rzeczywiscie odczytalo.
+        if (fwrite(buf, 1, n, stdout) != n) {
+            perror("fwrite");
+            fclose(plik);
+            return EXIT_FAILURE;
+        }
+    }
+
+    if (ferror(plik)) {
+        perror("fread");
+        fclose(plik);
+        return EXIT_FAILURE;
+    }
+
+    if (fclose(plik) == EOF) {
+        perror("fclose");
+        return EXIT_FAILURE;
+    }
+
+    return EXIT_SUCCESS;
+}
+
+//CZĘŚĆ I — ZAPISYWANIE DO PLIKU======================================================================================================
+// fprintf() — zapis sformatowanego tekstu
+Deklaracja :
+int fprintf(FILE * restrict stream,
+    const char* restrict format, ...);
+
+
+Argumenty:
+-stream — wskaźnik na strumień, np.plik.
+- format — napis określający sposób zapisu, np. "%d %c".
+- ... — dodatkowe wartości, które chcemy zapisać.
+Przykład :
+    FILE * plik = fopen("dane.txt", "w");
+
+if (plik == NULL)
+ERR("fopen");
+
+int liczba = 123;
+char znak = 'A';
+
+if (fprintf(plik, "%d %c\n", liczba, znak) < 0)
+    ERR("fprintf");
+
+if (fclose(plik) == EOF)
+ERR("fclose");
+
+
+W pliku znajdzie się :
+123 A
+
+
+Co zwraca ?
+-Przy sukcesie — liczbę zapisanych znaków.
+- Przy błędzie — wartość ujemną.
+Zapamiętaj : fprintf() działa jak printf(), tylko wypisuje do wskazanego strumienia zamiast domyślnie na standardowe wyjście.
+I nigdy nie rób :
+fprintf(plik, argv[1]);  // ŹLE!
+
+
+Zamiast tego :
+fprintf(plik, "%s", argv[1]);  // DOBRZE
+
+
+
+// fputc() — zapis jednego znaku
+Deklaracja :
+int fputc(int c, FILE * stream);
+
+
+Argumenty:
+-c — znak, który chcemy zapisać.
+- stream — strumień docelowy.
+Przykład :
+    fputc('A', plik);
+fputc('B', plik);
+fputc('C', plik);
+
+
+W pliku powstanie :
+ABC
+
+
+Co zwraca ?
+-Przy sukcesie — wartość zapisanego znaku jako unsigned char, przekonwertowaną na int.
+- Przy błędzie — EOF.
+Poprawna kontrola :
+if (fputc('A', plik) == EOF)
+ERR("fputc");
+
+
+Zapamiętaj: fputc() zapisuje jeden znak(bajt).
+
+// fputs() — zapis całego napisu
+Deklaracja :
+int fputs(const char* restrict s,
+    FILE * restrict stream);
+
+
+Argumenty:
+-s — napis zakończony '\0'.
+- stream — strumień, do którego zapisujemy.
+Przykład :
+    fputs("ALA MA KOTA", plik);
+
+
+Zawartość pliku :
+ALA MA KOTA
+
+
+Możemy również zrobić :
+char tekst[] = "Witaj!";
+
+fputs(tekst, plik);
+
+
+Co zwraca ?
+-Przy sukcesie — wartość nieujemną.
+- Przy błędzie — EOF.
+Kontrola :
+    if (fputs("Witaj!\n", plik) == EOF)
+        ERR("fputs");
+
+
+Ważna rzecz : fputs() nie dopisuje automatycznie \n.
+Czyli:
+fputs("ALA", plik);
+fputs("KOT", plik);
+
+
+da:
+ALAKOT
+
+
+A nie dwie linie
+// fwrite() — zapis bloku danych
+Deklaracja :
+size_t fwrite(const void* restrict ptr,
+    size_t size,
+    size_t nitems,
+    FILE * restrict stream);
+
+
+Argumenty:
+Argument	Znaczenie
+ptr	Adres danych w RAM
+size	Rozmiar jednego elementu w bajtach
+nitems	Liczba elementów
+stream	Strumień docelowy
+Przykład z tekstem :
+char tekst[] = "KOTEK";
+
+size_t n = fwrite(tekst, 1, 5, plik);
+
+
+Do pliku trafia pięć bajtów :
+KOTEK
+
+
+Przykład z liczbami zapisanymi binarnie :
+int liczby[] = { 10, 20, 30 };
+
+size_t n = fwrite(liczby, sizeof(int), 3, plik);
+
+
+Tutaj zapisujemy trzy wartości typu int w ich reprezentacji binarnej, a nie tekst 10 20 30.
+Co zwraca ?
+Liczbę kompletnie zapisanych elementów.
+Jeśli chcieliśmy zapisać 3 elementy, oczekujemy wyniku 3.
+if (fwrite(liczby, sizeof(int), 3, plik) != 3)
+ERR("fwrite");
+
+
+Zapamiętaj: fwrite() zapisuje surowe bajty, a nie interpretuje dane.
+
+// CZĘŚĆ II — ODCZYTYWANIE Z PLIKU==================================================================================//
+// fscanf() — odczyt sformatowanych danych
+Deklaracja :
+int fscanf(FILE * restrict stream,
+    const char* restrict format, ...);
+
+
+Argumenty:
+-stream — strumień, z którego czytamy.
+- format — format, według którego interpretujemy dane.
+- ... — zazwyczaj adresy zmiennych, do których trafią dane.
+Załóżmy, że plik zawiera :
+123 A
+
+
+Kod :
+int liczba;
+char znak;
+
+int wynik = fscanf(plik, "%d %c", &liczba, &znak);
+
+
+Po udanym odczycie :
+liczba = 123
+znak = 'A'
+
+
+Dlaczego piszemy & liczba ?
+Bo fscanf() musi znać adres zmiennej, do której wpisze odczytaną wartość.
+Co zwraca ?
+-Liczbę poprawnie przypisanych wartości.
+- EOF, jeśli przed pierwszym udanym przypisaniem nastąpi koniec danych lub błąd wejścia.
+Czyli :
+    if (fscanf(plik, "%d %c", &liczba, &znak) != 2) {
+        fprintf(stderr, "Niepoprawne dane lub koniec pliku\n");
+    }
+
+
+Dlaczego 2 ? Bo oczekujemy dwóch wartości : int i char.
+Uwaga : wynik 0 może oznaczać, że dane nie pasowały do formatu, a niekoniecznie błąd systemowy.
+
+// fgetc() — odczyt jednego znaku
+Deklaracja :
+int fgetc(FILE * stream);
+
+
+Argument:
+-stream — strumień, z którego czytamy.
+Załóżmy, że plik zawiera :
+KOTEK
+
+
+Kod :
+int a = fgetc(plik);
+int b = fgetc(plik);
+
+
+Otrzymamy:
+a = 'K'
+b = 'O'
+
+
+Ponieważ po każdym udanym odczycie pozycja przesuwa się dalej.
+Co zwraca ?
+-Przy sukcesie — odczytany bajt jako unsigned char przekonwertowany na int.
+- Przy końcu pliku lub błędzie — EOF.
+Dlatego :
+    int znak;
+
+
+a nie :
+char znak;
+
+
+Bo int musi pomieścić również specjalną wartość EOF.
+Typowy szablon :
+int znak;
+
+while ((znak = fgetc(plik)) != EOF) {
+    putchar(znak);
+}
+
+if (ferror(plik))
+ERR("fgetc");
+
+
+Zapamiętaj: fgetc() czyta jeden bajt naraz.
+
+// fgets() — odczyt linii tekstu
+Deklaracja :
+char* fgets(char* restrict s,
+    int n,
+    FILE * restrict stream);
+
+
+Argumenty:
+-s — bufor, do którego zapisujemy tekst.
+- n — pojemność bufora, czyli maksymalna liczba znaków łącznie z '\0'.
+- stream — strumień, z którego czytamy.
+Przykład :
+    char buf[100];
+
+if (fgets(buf, sizeof(buf), plik) != NULL) {
+    printf("%s", buf);
+}
+
+
+Jeśli plik zawiera :
+ALA MA KOTA
+KOT MA ALE
+
+
+pierwsze fgets() odczyta :
+    ALA MA KOTA
+
+
+    wraz ze znakiem \n, jeśli zmieści się on w buforze.
+    Drugie wywołanie pobierze następną linię.
+    Co zwraca ?
+    -Przy sukcesie — wskaźnik do bufora s.
+    - Przy błędzie lub końcu pliku, gdy nic nie odczytano — NULL.
+    Typowy szablon :
+char buf[100];
+
+while (fgets(buf, sizeof(buf), plik) != NULL) {
+    printf("%s", buf);
+}
+
+if (ferror(plik))
+ERR("fgets");
+
+
+Ważne: jeśli linia jest dłuższa od bufora, fgets() odczyta tylko jej fragment.Jedno wywołanie nie gwarantuje odczytania całej linii.
+Zapamiętaj : fgets() nadaje się do odczytywania tekstu fragmentami, zwykle linia po linii.
+
+// fread() — odczyt bloku danych
+Deklaracja :
+size_t fread(void* restrict ptr,
+    size_t size,
+    size_t nitems,
+    FILE * restrict stream);
+
+
+Argumenty:
+Argument	Znaczenie
+ptr	Bufor docelowy w RAM
+size	Rozmiar jednego elementu
+nitems	Liczba elementów
+stream	Strumień źródłowy
+Przykład :
+char buf[100];
+
+size_t n = fread(buf, 1, 100, plik);
+
+
+Co to oznacza ?
+Chcemy odczytać maksymalnie 100 elementów po 1 bajcie.
+Jeśli funkcja zwróci 35, odczytałyśmy 35 bajtów.
+Przykład z liczbami binarnymi :
+int liczby[3];
+
+size_t n = fread(liczby, sizeof(int), 3, plik);
+
+
+Chcemy pobrać trzy kompletne wartości typu int.
+Co zwraca ?
+Liczbę kompletnie odczytanych elementów.
+Jeśli wynik jest mniejszy niż nitems, mogły wystąpić koniec pliku lub błąd odczytu.
+Sprawdzamy to przez :
+if (ferror(plik)) {
+    ERR("fread");
+}
+
+if (feof(plik)) {
+    printf("Koniec pliku\n");
+}
+
+
+Pamiętaj: fread() nie dodaje '\0', nie zamienia tekstu na liczby i nie rozumie znaczenia danych.Po prostu odczytuje bajty.
+
+🧠 JEDNA DUŻA ŚCIĄGA — wszystkie 8 funkcji
+Funkcja	Działanie	Wynik przy sukcesie	Wynik przy błędzie
+fprintf()	Zapis sformatowanego tekstu	Liczba znaków	Wartość ujemna
+fputc()	Zapis jednego znaku	Wartość znaku	EOF
+fputs()	Zapis napisu	Wartość nieujemna	EOF
+fwrite()	Zapis bloku danych	Liczba pełnych elementów	Mniej niż nitems
+fscanf()	Odczyt według formatu	Liczba przypisań	EOF przy błędzie wejścia przed przypisaniem; 0 lub mniej przypisań przy niedopasowaniu
+fgetc()	Odczyt jednego znaku	Wartość znaku	EOF
+fgets()	Odczyt fragmentu linii	Wskaźnik do bufora	NULL
+fread()	Odczyt bloku danych	Liczba pełnychelementów	Mniej niż nitems
+
+
+//FCLOSE
+
+
+//getopt
+
+
+//getline
+-fgets() — musisz wcześniej przygotować bufor(miejsce w pamięci), do którego funkcja zapisze tekst.
+- getline() — może sama przydzielić pamięć i w razie potrzeby powiększyć bufor, żeby pomieścić całą linię.
+Spójrz na dwa przykłady.
+fgets()
+char line[10];
+
+fgets(line, 10, file);
+
+
+Z góry przygotowujemy tablicę o rozmiarze 10 bajtów.
+
+
+getline()
+char* line = NULL;
+size_t size = 0;
+
+getline(&line, &size, file);
+
+
+Funkcja sama przydzieli potrzebną pamięć.
+
+
+char* read_line(FILE * file)
+{
+    size_t capacity = 16;
+    size_t length = 0;
+
+    char* line = malloc(capacity);
+
+    if (line == NULL)
+    {
+        ERR("malloc");
+    }
+
+    while (1)
+    {
+        if (capacity - length < 2)
+        {
+            capacity *= 2;
+
+            char* tmp = realloc(line, capacity);
+
+            if (tmp == NULL)
+            {
+                free(line);
+                ERR("realloc");
+            }
+
+            line = tmp;
+        }
+
+        if (fgets(line + length, capacity - length, file) == NULL)
+        {
+            if (ferror(file))
+            {
+                free(line);
+                ERR("fgets");
+            }
+
+            if (length == 0)
+            {
+                free(line);
+                return NULL;
+            }
+
+            break;
+        }
+
+        length += strlen(line + length);
+
+        if (length > 0 && line[length - 1] == '\n')
+        {
+            break;
+        }
+    }
+
+    return line;
+}
+
+Po udanym odczycie getline() zwraca liczbę przeczytanych bajtów, zwykle wraz ze znakiem nowej linii \n, jeśli występował.
+Natomiast - 1 oznacza, że wystąpił koniec pliku albo błąd odczytu.
+
+//STRLEN
+strlen() oblicza długość napisu, nie licząc końcowego '\0'.
+Dla napisu "e":
+strlen("e") == 1
+
+
+Dla napisu "hello" :
+    strlen("hello") == 5
+
+    //SIZEOF liczty \0
+
+    // GETLINE
+
+    size_t pathbufsize, pathsize;
+
+if ((pathsize = getline(&path, &pathbufsize, stdin)) < 0)
+    ERR("getline");
+
+path[pathsize - 1] = 0;
+...
+free(path);
+
+//
