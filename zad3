@@ -1,7 +1,6 @@
 #define _XOPEN_SOURCE 700
 
 #include <errno.h>
-#include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,7 +18,7 @@ void usage(const char* pname)
 {
     fprintf(stderr,
             "usage:\n"
-            "  %s -c -v <ENVIRONMENT_NAME>                          create environment\n"
+            "  %s -c -v <ENVIRONMENT_NAME>                                create environment\n"
             "  %s -v <ENVIRONMENT_NAME> [-v ...] -i <PACKAGE>==<VERSION>  install package\n"
             "  %s -v <ENVIRONMENT_NAME> [-v ...] -r <PACKAGE>             remove package\n",
             pname, pname, pname);
@@ -51,6 +50,19 @@ void make_path(char* buf, const char* dir, const char* file)
         fprintf(stderr, "sop-venv: path too long: %s/%s\n", dir, file);
         exit(EXIT_FAILURE);
     }
+}
+
+// Tworzy nowy plik przez fopen z uprawnieniami perms.
+// fopen zawsze nadaje 0666 & ~umask, więc ustawiamy umask na bity, których NIE chcemy,
+// a po utworzeniu pliku przywracamy poprzednią maskę.
+FILE* create_file(const char* path, mode_t perms)
+{
+    mode_t old_mask = umask(~perms & 0777);  // umask nie zwraca błędów, tylko starą maskę
+    FILE* f = fopen(path, "w");
+    umask(old_mask);
+    if (!f)
+        ERR("fopen");
+    return f;
 }
 
 // Środowisko istnieje, gdy jest katalogiem i zawiera plik requirements.
@@ -108,11 +120,10 @@ int is_installed(const char* env, const char* name)
 
 /* ============================ Operacje ============================ */
 
-// -c: utworzenie katalogu środowiska i pustego pliku requirements.
+// -c: utworzenie katalogu środowiska i pustego pliku requirements (rw-r--r--).
 void create_env(const char* env)
 {
     char path[PATH_MAX];
-    int fd;
 
     if (mkdir(env, 0755))
     {
@@ -125,39 +136,35 @@ void create_env(const char* env)
     }
 
     make_path(path, env, "requirements");
-    if ((fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0644)) < 0)
-        ERR("open");
-    if (close(fd))
-        ERR("close");
+    FILE* f = create_file(path, 0644);
+    if (fclose(f))
+        ERR("fclose");
 }
 
 // Tworzy plik pakietu wypełniony losowymi literami, z prawami r--r--r--.
 void create_package_file(const char* env, const char* name)
 {
     char path[PATH_MAX];
-    char content[100];
     int size = 10 + rand() % 91;  // losowy rozmiar 10..100 bajtów
-    int fd;
-
-    for (int i = 0; i < size; i++)
-        content[i] = 'a' + rand() % 26;
 
     make_path(path, env, name);
-    // O_EXCL: błąd, jeśli plik już istnieje. Prawa 0444 = tylko odczyt dla wszystkich
-    // (mimo to możemy pisać przez ten deskryptor, bo plik właśnie tworzymy).
-    if ((fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0444)) < 0)
-    {
-        if (errno == EEXIST)
-            fail("package file already exists", env, name);
-        ERR("open");
-    }
-    if (write(fd, content, size) != size)
-        ERR("write");
-    if (close(fd))
-        ERR("close");
+
+    // fopen "w" nadpisałby istniejący plik (i zostawił jego stare prawa),
+    // dlatego najpierw sprawdzamy, czy plik już istnieje.
+    if (access(path, F_OK) == 0)
+        fail("package file already exists", env, name);
+
+    // Prawa 0444 = tylko odczyt dla wszystkich. Mimo to możemy pisać przez ten FILE*,
+    // bo prawa sprawdzane są przy otwieraniu, a plik właśnie tworzymy.
+    FILE* f = create_file(path, 0444);
+    for (int i = 0; i < size; i++)
+        if (fputc('a' + rand() % 26, f) == EOF)
+            ERR("fputc");
+    if (fclose(f))
+        ERR("fclose");
 }
 
-// -i: dopisanie "nazwa wersja" do requirements i utworzenie pliku pakietu.
+// -i: utworzenie pliku pakietu i dopisanie "nazwa wersja" do requirements.
 void install_package(const char* env, const char* name, const char* version)
 {
     char path[PATH_MAX];
@@ -193,8 +200,7 @@ void remove_package(const char* env, const char* name)
     make_path(tmp_path, env, "requirements.tmp");
     if (!(in = fopen(path, "r")))
         ERR("fopen");
-    if (!(out = fopen(tmp_path, "w")))
-        ERR("fopen");
+    out = create_file(tmp_path, 0644);  // po rename będzie nowym requirements, więc rw-r--r--
 
     while (getline(&line, &len, in) != -1)
         if (!line_matches(line, name))
@@ -221,9 +227,9 @@ void remove_package(const char* env, const char* name)
 
 int main(int argc, char** argv)
 {
-    char operation = 0;     // 'c', 'i' albo 'r'
-    char* package = NULL;   // argument -i lub -r
-    char* version = NULL;   // tylko dla -i
+    char operation = 0;    // 'c', 'i' albo 'r'
+    char* package = NULL;  // argument -i lub -r
+    char* version = NULL;  // tylko dla -i
     int env_count = 0;
     int c;
 
