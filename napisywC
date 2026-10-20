@@ -1,0 +1,901 @@
+Notatki z C — funkcje do parsowania i przetwarzania tekstu
+To będzie ściąga do nauki na kolokwium z C, szczególnie pod zadania z plikami, wskaźnikami, malloc() i parsowaniem nazw plików.
+Omówimy nie tylko to, co robi każda funkcja, ale również:
+- jakie argumenty przyjmuje i co zwraca,
+- czy uwzględnia znak '\0',
+- czy modyfikuje oryginalny napis,
+- czy alokuje pamięć,
+- czy trzeba później wykonać free(),
+- co dokładnie dzieje się w pamięci RAM,
+- na jakie pułapki trzeba uważać.
+1. Najpierw podstawy: czym jest napis w C?
+W C napis to tablica znaków zakończona bajtem '\0'.
+char tekst[] = "kot";
+
+
+W pamięci:
+Napis "kot" w pamięci RAM
+[0]
+'k'
+
+
+[1]
+'o'
+
+
+[2]
+'t'
+
+
+[3]
+'\0'
+
+
+
+strlen("kot") = 3, ale sizeof(tekst) = 4.
+
+To podstawowa różnica, którą musisz znać:
+- '\0' — znak kończący napis, kod liczbowy 0.
+- '\n' — znak nowej linii, np. po naciśnięciu Enter.
+- '0' — znak cyfry zero, kod ASCII 48.
+- NULL — pusty wskaźnik, a nie znak kończący napis.
+Przyda się także wiedzieć, że '\0' nie jest automatycznie usuwany przy przetwarzaniu tekstu. Większość funkcji tekstowych używa go do ustalenia, gdzie kończy się napis.
+2. Ściąga — najważniejsze funkcje
+Funkcja	Co robi	'\0'	malloc/free
+strlen	Długość napisu	Nie liczy	Nie
+sizeof	Rozmiar obiektu	Liczy, jeśli jest w tablicy	Nie
+strcmp	Porównuje napisy	Kończy na '\0'	Nie
+strncmp	Porównuje maks. n znaków	Kończy na '\0'	Nie
+strchr	Szuka pierwszego znaku	Można szukać '\0'	Nie
+strrchr	Szuka ostatniego znaku	Można szukać '\0'	Nie
+strstr	Szuka podnapisu	Nie przeszukuje za '\0'	Nie
+strcpy	Kopiuje napis	Kopiuje '\0'	Nie
+strncpy	Kopiuje do n znaków	Niekoniecznie dopisuje '\0'	Nie
+strcat	Dokleja napis	Dopisuje '\0'	Nie
+strdup	Tworzy kopię napisu	Kopiuje '\0'	Tak, free
+strndup	Kopiuje maks. n znaków	Dopisuje '\0'	Tak, free
+getline	Czyta cały wiersz	Dopisuje '\0'	Tak, zwykle free
+fgets	Czyta tekst do bufora	Dopisuje '\0'	Nie
+strtok	Dzieli napis na fragmenty	Wstawia '\0'	Nie
+strtol	Zamienia tekst na liczbę	Kończy na niedopasowanym znaku	Nie
+sscanf	Odczytuje dane według formatu	Czyta napis zakończony '\0'	Nie
+snprintf	Zapisuje sformatowany tekst	Dopisuje '\0' przy n > 0	Nie
+strspn	Liczy początkowe dopasowane znaki	Nie liczy '\0'	Nie
+strcspn	Szuka pierwszego niedozwolonego znaku	Nie liczy '\0'	Nie
+
+3. Funkcje do odczytywania tekstu
+getline() — odczyt całej linii
+Nagłówek:
+#include <stdio.h>
+
+
+Na systemach POSIX, np. Linux, można udostępnić deklarację przez zdefiniowanie _POSIX_C_SOURCE 200809L przed nagłówkami.
+Sygnatura:
+ssize_t getline(char** lineptr, size_t* n, FILE* stream);
+
+
+Działanie: wczytuje całą linię, w razie potrzeby przydzielając lub powiększając bufor.
+char* tekst = NULL;
+size_t rozmiar = 0;
+
+ssize_t ile = getline(&tekst, &rozmiar, stdin);
+
+if (ile == -1) {
+    free(tekst);
+    return 1;
+}
+
+printf("%s", tekst);
+
+free(tekst);
+
+
+Załóżmy, że wpisujemy Ala i Enter.
+W pamięci:
+'A' 'l' 'a' '\n' '\0'
+
+
+Funkcja zwraca:
+ile == 4;
+
+
+Nie liczy końcowego '\0', ale liczy '\n', jeżeli ten znak został odczytany.
+rozmiar przechowuje pojemność przydzielonego bufora, która może być większa od 5.
+Dlaczego:
+getline(&tekst, &rozmiar, stdin);
+
+
+a nie:
+getline(tekst, &rozmiar, stdin);
+
+
+Bo getline() musi mieć możliwość zmiany wartości wskaźnika tekst, np. zapisania do niego adresu nowego bloku pamięci.
+Usuwanie Entera
+if (ile > 0 && tekst[ile - 1] == '\n')
+    tekst[ile - 1] = '\0';
+
+
+To bezpieczniejsze niż bezwarunkowe tekst[ile - 1] = '\0', ponieważ ostatnia linia pliku nie musi kończyć się znakiem '\n'.
+fgets() — odczyt do istniejącej tablicy
+Sygnatura:
+char* fgets(char* s, int size, FILE* stream);
+
+
+Przykład:
+char tekst[100];
+
+if (fgets(tekst, sizeof(tekst), stdin) == NULL)
+    return 1;
+
+printf("%s", tekst);
+
+
+fgets():
+- czyta maksymalnie size - 1 znaków,
+- dopisuje '\0',
+- zachowuje '\n', jeśli zmieści się on w buforze,
+- zwraca NULL przy błędzie albo końcu pliku, gdy nie odczytano żadnych znaków.
+Porównanie:
+getline()	fgets()
+Może automatycznie powiększać bufor	Korzysta z już istniejącego bufora
+Przyjmuje char**	Przyjmuje char*
+Zwraca liczbę odczytanych bajtów	Zwraca wskaźnik lub NULL
+Bufor może wymagać free()	Nie wymaga free(), jeśli jest lokalną tablicą
+Może odczytać dowolnie długi wiersz, jeśli starczy pamięci	Długi wiersz może zostać podzielony na kilka odczytów
+
+4. Funkcje do badania długości napisów
+strlen() — długość napisu
+Nagłówek:
+#include <string.h>
+
+
+Sygnatura:
+size_t strlen(const char* s);
+
+
+Przykład:
+char napis[] = "Ala";
+
+printf("%zu\n", strlen(napis)); // 3
+
+
+Funkcja liczy znaki aż do pierwszego '\0', ale samego '\0' nie uwzględnia.
+Indeks:  0   1   2    3
+         A   l   a   \0
+
+
+Wynik: 3.
+strlen() a sizeof()
+char tekst[] = "kot";
+
+printf("%zu\n", strlen(tekst)); // 3
+printf("%zu\n", sizeof(tekst)); // 4
+
+
+sizeof(tekst) daje 4, bo tablica zawiera też '\0'.
+Ale uwaga:
+char* tekst = "kot";
+
+printf("%zu\n", sizeof(tekst));
+
+
+Na typowej architekturze 64-bitowej wynik wyniesie 8, ponieważ sizeof mierzy rozmiar wskaźnika, a nie długość napisu.
+To bardzo częsty haczyk na kolokwiach.
+
+5. Funkcje do porównywania napisów
+strcmp() — porównanie całych napisów
+int strcmp(const char* s1, const char* s2);
+
+
+Przykład:
+strcmp("kot", "kot"); // 0
+strcmp("ala", "ola"); // wynik ujemny
+strcmp("zebra", "ala"); // wynik dodatni
+
+
+Wartość zwracana:
+Wynik	Znaczenie
+0	Napisy są identyczne
+< 0	Pierwszy napis jest leksykograficznie mniejszy
+> 0	Pierwszy napis jest leksykograficznie większy
+Nie zakładaj, że wynik musi być dokładnie -1 lub 1.
+Funkcja porównuje znaki aż do pierwszej różnicy lub końca napisów, uwzględniając położenie '\0'.
+Przykład zastosowania:
+if (strcmp(dp->d_name, ".") == 0 ||
+    strcmp(dp->d_name, "..") == 0)
+{
+    continue;
+}
+
+
+To sposób na pominięcie wpisów . i .. podczas przeszukiwania katalogu.
+Nie porównujemy napisów za pomocą ==:
+if (napis1 == napis2) // Porównuje adresy!
+
+
+Do porównania treści używamy strcmp().
+strncmp() — porównanie maksymalnie n znaków
+int strncmp(const char* s1, const char* s2, size_t n);
+
+
+Przykład:
+strncmp("magazyn_Warszawa", "magazyn_", 8);
+
+
+Wynik wynosi 0, ponieważ pierwsze 8 znaków się zgadza.
+To idealna funkcja do sprawdzania prefiksów nazw plików.
+#define PREFIX "magazyn_"
+
+if (strncmp(nazwa, PREFIX, sizeof(PREFIX) - 1) == 0)
+{
+    printf("Znaleziono magazyn\n");
+}
+
+
+Dlaczego - 1?
+Ponieważ:
+sizeof("magazyn_") == 9
+
+
+Jest 8 widocznych znaków i jeden '\0'.
+strncmp() porównuje maksymalnie n znaków, ale kończy także po osiągnięciu terminatora.
+
+6. Funkcje do wyszukiwania znaków
+strchr() — znajdź pierwsze wystąpienie znaku
+char* strchr(const char* s, int c);
+
+
+Zwraca wskaźnik na pierwsze wystąpienie znaku albo NULL, jeśli go nie znaleziono.
+Przykład:
+char tekst[] = "Ala ma kota";
+
+char* p = strchr(tekst, 'm');
+
+if (p != NULL)
+    printf("%s\n", p);
+
+
+Wynik:
+ma kota
+
+
+Dlaczego nie wypisuje tylko m?
+Bo p jest wskaźnikiem na znak m, a %s wypisuje wszystkie znaki od tego miejsca aż do '\0'.
+Jak działa strchr()
+Wskaźnik p wskazuje na literę m w oryginalnej tablicy. Nie powstaje kopia napisu.
+Czy strchr() widzi '\0'?
+Tak! Możemy nawet wyszukać znak kończący napis:
+char tekst[] = "kot";
+char* koniec = strchr(tekst, '\0');
+
+
+koniec będzie wskazywał na bajt '\0' na końcu napisu, czyli tak samo jak tekst + strlen(tekst).
+Praktyczny przykład: usuwanie Entera
+char tekst[100];
+
+if (fgets(tekst, sizeof(tekst), stdin) != NULL)
+{
+    char* p = strchr(tekst, '\n');
+
+    if (p != NULL)
+        *p = '\0';
+}
+
+
+Tutaj *p = '\0' modyfikuje oryginalną tablicę, zastępując znak nowej linii terminatorem.
+strrchr() — znajdź ostatnie wystąpienie znaku
+char* strrchr(const char* s, int c);
+
+
+Przykład:
+char plik[] = "raport.finalny.txt";
+
+char* p = strrchr(plik, '.');
+
+if (p != NULL)
+    printf("%s\n", p);
+
+
+Wynik:
+.txt
+
+
+Bardzo przydatne do szukania rozszerzenia pliku.
+Również strrchr() może znaleźć końcowe '\0', jeśli właśnie tego znaku szukamy.
+
+7. Funkcja strstr() — wyszukiwanie całego fragmentu
+char* strstr(const char* tekst, const char* wzorzec);
+
+
+Przykład:
+char tekst[] = "Ala ma czarnego kota";
+
+char* p = strstr(tekst, "czarnego");
+
+if (p != NULL)
+    printf("%s\n", p);
+
+
+Wynik:
+czarnego kota
+
+
+Zwraca wskaźnik do początku pierwszego wystąpienia poszukiwanego fragmentu.
+Nie alokuje pamięci i nie zmienia oryginalnego napisu.
+Przykład zastosowania do plików:
+if (strstr(dp->d_name, ".txt") != NULL)
+{
+    printf("Nazwa zawiera .txt\n");
+}
+
+
+Uwaga: to sprawdza obecność .txt gdziekolwiek w nazwie, a niekoniecznie na jej końcu.
+Jeśli wzorzec jest pustym napisem "", strstr() zwraca wskaźnik na początek przeszukiwanego napisu.
+
+8. Kopiowanie napisów
+strcpy() — skopiuj cały napis
+char* strcpy(char* dest, const char* src);
+
+
+Przykład:
+char cel[20];
+char zrodlo[] = "Ala";
+
+strcpy(cel, zrodlo);
+
+
+Po operacji w cel mamy:
+'A' 'l' 'a' '\0'
+
+
+strcpy() kopiuje również '\0'.
+Nie alokuje pamięci. Bufor docelowy musi już istnieć i być wystarczająco duży.
+Niebezpieczne:
+char cel[3];
+strcpy(cel, "Ala");  // BLAD
+
+
+Potrzebujemy 4 bajtów, nie 3!
+strncpy() — kopiowanie z limitem
+char* strncpy(char* dest, const char* src, size_t n);
+
+
+Przykład:
+char cel[5];
+
+strncpy(cel, "Warszawa", 5);
+
+
+Po tej operacji otrzymujemy 5 znaków:
+'W' 'a' 'r' 's' 'z'
+
+
+Nie ma '\0'!
+To jedna z najważniejszych pułapek.
+Jeśli źródło ma co najmniej n znaków, strncpy() nie dopisuje terminatora.
+Z kolei jeśli źródło jest krótsze niż n, pozostałe bajty w buforze docelowym zostają wypełnione zerami.
+Dlatego nie należy zakładać, że strncpy() zawsze tworzy poprawny napis C.
+strdup() — dynamiczna kopia napisu
+char* strdup(const char* s);
+
+
+strdup() jest funkcją POSIX. Jest dostępna m.in. na Linuxie przez <string.h> z odpowiednimi ustawieniami funkcji POSIX.
+Przykład:
+char tekst[] = "Krakow";
+
+char* kopia = strdup(tekst);
+
+if (kopia == NULL)
+{
+    perror("strdup");
+    exit(EXIT_FAILURE);
+}
+
+printf("%s\n", kopia);
+
+free(kopia);
+
+
+strdup():
+1. Oblicza potrzebną długość napisu.
+2. Przydziela nowy blok pamięci.
+3. Kopiuje znaki wraz z '\0'.
+4. Zwraca adres nowego bloku.
+Oryginał i kopia są niezależne.
+Pamięć po strdup()
+Oryginał
+tekst → np. 0x1000
+Krakow\0
+
+
+
+Kopia
+kopia → np. 0x2000
+Krakow\0
+
+
+
+
+Po strdup() mamy dwie osobne tablice znaków. Kopia wymaga free(kopia).
+strndup() — dynamiczna kopia maksymalnie n znaków
+char* strndup(const char* s, size_t n);
+
+
+Przykład:
+char* p = strndup("Warszawa", 4);
+
+// p -> "Wars"
+
+free(p);
+
+
+Funkcja kopiuje maksymalnie n znaków, przydzielając pamięć na wynik oraz końcowe '\0'.
+Przydatna do wyciągania fragmentów napisów.
+
+9. Łączenie napisów
+strcat() — doklej napis na koniec
+char* strcat(char* dest, const char* src);
+
+
+Przykład:
+char tekst[30] = "Ala";
+
+strcat(tekst, " ma kota");
+
+printf("%s\n", tekst);
+
+
+Wynik:
+Ala ma kota
+
+
+strcat() znajduje '\0' w buforze docelowym i od tego miejsca kopiuje napis źródłowy, razem z jego terminatorem.
+Musimy zapewnić odpowiednio duży bufor docelowy.
+Istnieje również:
+strncat(dest, src, n);
+
+
+która dopisuje maksymalnie n znaków źródła i następnie '\0'. Nadal musimy zadbać o miejsce w buforze.
+
+10. strtok() — dzielenie tekstu na części
+char* strtok(char* str, const char* delim);
+
+
+Przykład:
+char tekst[] = "Adam;25;Warszawa";
+
+char* p = strtok(tekst, ";");
+
+while (p != NULL)
+{
+    printf("%s\n", p);
+    p = strtok(NULL, ";");
+}
+
+
+Wynik:
+Adam
+25
+Warszawa
+
+
+Co dzieje się w pamięci?
+Początkowo:
+Adam;25;Warszawa\0
+
+
+Po podziale:
+Adam\025\0Warszawa\0
+
+
+To znaczy, że strtok() zamienia znalezione separatory na '\0'.
+Tablica po podziale przez strtok()
+Adam
+
+\0
+
+25
+
+\0
+
+Warszawa
+
+\0
+
+
+Wszystkie tokeny pozostają w jednej oryginalnej tablicy. strtok() nie wykonuje malloc().
+Ważne właściwości:
+- strtok() modyfikuje tekst źródłowy.
+- Nie wolno przekazywać modyfikowanego literału napisu.
+- Pomiędzy kolejnymi wywołaniami przechowuje swój stan.
+- Kolejne separatory traktuje jak jedną granicę — nie zwraca pustych tokenów.
+- Nie wykonujemy free() na zwróconych wskaźnikach.
+Jeśli potrzebujemy bezpiecznie przetwarzać kilka napisów niezależnie, na systemach POSIX mamy także strtok_r(), które otrzymuje dodatkowy wskaźnik przechowujący stan parsowania.
+
+11. Konwersja tekstu na liczby
+atoi() — tekst na int
+int atoi(const char* s);
+
+
+Przykład:
+int x = atoi("123");
+
+
+Wynik x = 123.
+Funkcja jest prosta, ale ma istotną wadę: nie daje dobrego sposobu na wykrycie błędnego tekstu lub przepełnienia.
+Dlatego do solidnego parsowania lepiej używać strtol().
+strtol() — bezpieczniejsza konwersja
+long strtol(const char* nptr, char** endptr, int base);
+
+
+Przykład:
+char tekst[] = "123abc";
+
+char* koniec;
+
+long liczba = strtol(tekst, &koniec, 10);
+
+printf("%ld\n", liczba);
+printf("%s\n", koniec);
+
+
+Wynik:
+123
+abc
+
+
+strtol() odczytuje początkowy fragment będący liczbą, a następnie zapisuje do koniec adres pierwszego nieprzetworzonego znaku.
+Znów pojawia się char**!
+Dlaczego &koniec? Ponieważ funkcja ma zmienić wartość wskaźnika koniec.
+Poprawne sprawdzanie błędów
+#include <errno.h>
+#include <stdlib.h>
+
+char tekst[] = "123";
+char* koniec;
+
+errno = 0;
+long x = strtol(tekst, &koniec, 10);
+
+if (tekst == koniec)
+    printf("Nie znaleziono liczby\n");
+else if (errno == ERANGE)
+    printf("Liczba poza zakresem\n");
+else if (*koniec != '\0')
+    printf("Pozostaly dodatkowe znaki\n");
+else
+    printf("Poprawna liczba: %ld\n", x);
+
+
+Zwróć uwagę na:
+*koniec == '\0'
+
+
+To oznacza, że po liczbie nie zostały żadne dodatkowe znaki.
+Podobne funkcje:
+Funkcja	Typ wyniku
+strtol	long
+strtoll	long long
+strtoul	unsigned long
+strtoull	unsigned long long
+strtod	double
+strtof	float
+
+12. sscanf() — odczytywanie danych z napisu
+int sscanf(const char* str, const char* format, ...);
+
+
+To jedna z najważniejszych funkcji w Twoich zadaniach.
+Przykład:
+char tekst[] = "Adam 25 4500";
+
+char imie[50];
+int wiek;
+int pensja;
+
+int wynik = sscanf(tekst, "%49s %d %d",
+                   imie, &wiek, &pensja);
+
+
+Jeżeli wynik == 3, udało się wykonać trzy przypisania.
+Po odczycie:
+imie = "Adam"
+wiek = 25
+pensja = 4500
+
+
+Najważniejsze formaty
+Format	Oczekiwany argument
+%d	int*
+%u	unsigned int*
+%ld	long*
+%lu	unsigned long*
+%lld	long long*
+%llu	unsigned long long*
+%f	float*
+%lf	double*
+%s	char* do odpowiednio dużego bufora
+%c	char*
+%n	int*, zapisuje liczbę dotychczas przetworzonych znaków
+Uważaj: %s dopisuje '\0', ale %c nie.
+Przy %s stosuj limit szerokości, np. %49s dla tablicy char imie[50].
+Przykład z nazwą pliku
+char nazwa[] = "3paczki_2listy";
+
+unsigned long paczki;
+unsigned long listy;
+
+if (sscanf(nazwa, "%lupaczki_%lulisty",
+           &paczki, &listy) == 2)
+{
+    printf("%lu %lu\n", paczki, listy);
+}
+
+
+Wynik:
+3 2
+
+
+Ważne: sscanf() zwracające 2 nie zawsze oznacza, że cała nazwa odpowiada wzorcowi. Może pozostać dodatkowy tekst.
+Można użyć %n do sprawdzenia liczby przetworzonych znaków:
+int koniec = -1;
+
+if (sscanf(nazwa, "%lupaczki_%lulisty%n",
+           &paczki, &listy, &koniec) == 2 &&
+    koniec >= 0 &&
+    nazwa[koniec] == '\0')
+{
+    printf("Cala nazwa pasuje\n");
+}
+
+
+
+13. snprintf() — tworzenie napisów
+int snprintf(char* str, size_t size, const char* format, ...);
+
+
+Ta funkcja jest bardzo przydatna przy budowaniu ścieżek.
+Przykład:
+char sciezka[100];
+
+int n = snprintf(sciezka, sizeof(sciezka),
+                 "%s/%s", "data", "magazyn_Warszawa");
+
+if (n < 0 || (size_t)n >= sizeof(sciezka))
+{
+    printf("Blad lub za dluga sciezka\n");
+}
+
+
+W buforze otrzymujemy:
+data/magazyn_Warszawa
+
+
+snprintf() zapisuje maksymalnie size - 1 znaków wyniku i końcowe '\0', jeżeli size > 0.
+Zwraca liczbę znaków, które byłyby potrzebne do utworzenia całego napisu, bez uwzględniania '\0'.
+Dlatego sprawdzenie n >= sizeof(sciezka) pozwala wykryć, że wynik nie zmieścił się w buforze.
+
+14. strspn() i strcspn() — bardzo przydatne przy parsowaniu
+strspn()
+size_t strspn(const char* s, const char* accept);
+
+
+Zwraca długość początkowego fragmentu napisu składającego się wyłącznie ze znaków ze zbioru accept.
+Przykład:
+size_t n = strspn("12345abc", "0123456789");
+
+
+Wynik:
+5
+
+
+Przydatne do sprawdzania, jak długi jest początkowy ciąg cyfr.
+strcspn()
+size_t strcspn(const char* s, const char* reject);
+
+
+Zwraca długość początkowego fragmentu, który nie zawiera żadnego znaku ze zbioru reject.
+Przykład:
+size_t n = strcspn("Adam;25;Warszawa", ";");
+
+
+Wynik:
+4
+
+
+A najbardziej praktyczne zastosowanie:
+char tekst[100];
+
+if (fgets(tekst, sizeof(tekst), stdin) != NULL)
+{
+    tekst[strcspn(tekst, "\n")] = '\0';
+}
+
+
+To usuwa końcowy Enter, jeśli jest obecny.
+Jeżeli '\n' nie zostanie znaleziony, strcspn() zwróci długość napisu, więc zapiszemy '\0' w miejscu już istniejącego terminatora.
+
+15. memcpy(), memmove() i memcmp() — operacje na bajtach
+Te funkcje różnią się od typowych funkcji tekstowych.
+Nie traktują '\0' jako końca danych. Przetwarzają dokładnie tyle bajtów, ile podasz.
+memcpy()
+void* memcpy(void* dest, const void* src, size_t n);
+
+
+Kopiuje n bajtów.
+char src[] = "kot";
+char dest[4];
+
+memcpy(dest, src, 4);
+
+
+Skopiowaliśmy również '\0', ponieważ podaliśmy 4 bajty.
+Jeśli obszary źródłowy i docelowy nachodzą na siebie, zachowanie memcpy() jest niezdefiniowane.
+memmove()
+void* memmove(void* dest, const void* src, size_t n);
+
+
+Podobna do memcpy(), ale działa poprawnie również dla nakładających się obszarów pamięci.
+Przykład:
+char tekst[] = "abcdef";
+
+memmove(tekst + 2, tekst, 4);
+
+
+Po operacji tablica zawiera napis:
+ababcd
+
+
+memcmp()
+int memcmp(const void* a, const void* b, size_t n);
+
+
+Porównuje dokładnie n bajtów, także jeśli napotka bajt zerowy.
+Przykład:
+char a[] = {'A', '\0', 'B'};
+char b[] = {'A', '\0', 'C'};
+
+memcmp(a, b, 3); // wynik ujemny
+
+
+strcmp() nie zobaczyłoby różnicy po '\0', natomiast memcmp() ją wykryje.
+
+16. strpbrk() — szukanie dowolnego znaku ze zbioru
+char* strpbrk(const char* s, const char* accept);
+
+
+Zwraca wskaźnik na pierwszy znak napisu s, który występuje w zbiorze accept.
+Przykład:
+char tekst[] = "Adam,25;Warszawa";
+
+char* p = strpbrk(tekst, ",;");
+
+if (p != NULL)
+    printf("%s\n", p);
+
+
+Wynik:
+,25;Warszawa
+
+
+To dobre rozwiązanie, gdy separatorami mogą być różne znaki, np. przecinek, średnik lub dwukropek.
+
+17. Funkcje z <ctype.h> — sprawdzanie pojedynczych znaków
+Funkcja	Działanie
+isdigit(c)	Czy znak jest cyfrą
+isalpha(c)	Czy znak jest literą
+isalnum(c)	Czy znak jest literą lub cyfrą
+isspace(c)	Czy znak jest białym znakiem
+islower(c)	Czy znak jest małą literą
+isupper(c)	Czy znak jest wielką literą
+tolower(c)	Zamienia na małą literę, jeśli możliwe
+toupper(c)	Zamienia na wielką literę, jeśli możliwe
+Przykład:
+#include <ctype.h>
+
+char tekst[] = "Ala123";
+
+for (int i = 0; tekst[i] != '\0'; i++)
+{
+    if (isdigit((unsigned char)tekst[i]))
+        printf("Cyfra: %c\n", tekst[i]);
+}
+
+
+Wynik:
+Cyfra: 1
+Cyfra: 2
+Cyfra: 3
+
+
+Rzutowanie na unsigned char jest ważne, ponieważ funkcje ctype.h wymagają wartości reprezentowalnej jako unsigned char albo EOF.
+
+18. Praktyczny przykład łączący kilka funkcji
+Załóżmy, że masz napis:
+magazyn_Warszawa_125.txt
+
+
+Chcesz odczytać z niego nazwę miasta i numer magazynu.
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+int main(void)
+{
+    char nazwa[] = "magazyn_Warszawa_125.txt";
+
+    const char* prefix = "magazyn_";
+
+    // 1. Sprawdzamy poczatek napisu
+    if (strncmp(nazwa, prefix, strlen(prefix)) != 0)
+        return 1;
+
+    // 2. Przesuwamy wskaznik za prefiks
+    char* miasto = nazwa + strlen(prefix);
+
+    // 3. Szukamy ostatniego podkreslenia
+    char* separator = strrchr(miasto, '_');
+
+    if (separator == NULL)
+        return 1;
+
+    // 4. Tworzymy osobna kopie nazwy miasta
+    char* kopia = strndup(miasto, separator - miasto);
+
+    if (kopia == NULL)
+        return 1;
+
+    // 5. Odczytujemy numer po podkresleniu
+    char* koniec;
+    long numer = strtol(separator + 1, &koniec, 10);
+
+    if (koniec == separator + 1 ||
+        strcmp(koniec, ".txt") != 0)
+    {
+        free(kopia);
+        return 1;
+    }
+
+    printf("Miasto: %s\n", kopia);
+    printf("Numer: %ld\n", numer);
+
+    free(kopia);
+    return 0;
+}
+
+
+
+Wynik:
+Miasto: Warszawa
+Numer: 125
+
+
+Zwróć uwagę na:
+separator - miasto
+
+
+To odejmowanie dwóch wskaźników do znaków tej samej tablicy. Wynikiem jest odległość między nimi, czyli liczba znaków nazwy miasta.
+strndup() tworzy osobną kopię tego fragmentu i dopisuje końcowe '\0'.
+
+19. Najczęstsze błędy na kolokwium
+Błąd	Dlaczego jest problemem?
+strcmp(a,b) == 1	Dodatni wynik nie musi wynosić 1
+strlen() liczy '\0'	Nie, terminator nie jest liczony
+strncpy() zawsze kończy napis	Nie zawsze dopisuje '\0'
+strdup() bez free()	Wyciek pamięci
+strtok() na literale napisu	Próba modyfikacji pamięci, której nie wolno zmieniać
+strchr() bez sprawdzenia NULL	Możliwość dereferencji pustego wskaźnika
+fscanf("%s", ...) bez limitu	Ryzyko przepełnienia bufora
+getline(path, ...) zamiast getline(&path, ...)	Niezgodny typ argumentu
+sizeof(wskaznik) jako długość napisu	Mierzy wskaźnik, nie napis
+memcpy() dla nakładających się buforów	Zachowanie niezdefiniowane
+
+20. Miniściąga: kiedy używać jakiej funkcji?
+Wybierz, co chcesz zrobić z tekstemWczytanie całej linii o nieznanej długości
+getline()
+Może automatycznie przydzielić i powiększać pamięć; zwalniasz bufor przez free().
+
+Co zapamiętać w pierwszej kolejności?
+Do zadań w stylu Twojego egzaminu szczególnie dobrze opanować getline, strlen, strcmp, strncmp, strchr, strrchr, strstr, strdup, sscanf, strtol oraz snprintf.
+I zawsze podczas pracy z napisami zadawaj sobie trzy pytania: czy funkcja zwraca wskaźnik czy wartość, czy tworzy nowy bufor oraz kto odpowiada za jego zwolnienie? To pozwala uniknąć większości błędów pamięciowych w C.
