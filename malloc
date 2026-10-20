@@ -1,0 +1,107 @@
+
+#include <stdio.h>
+#include <stdlib.h>
+
+typedef struct {
+    char imie[50];
+    int wiek;
+    int pensja;
+} Pracownik;
+
+typedef struct {
+    int liczba;
+    Pracownik* osoby;
+} Firma;
+
+int main(void)
+{
+    Firma firma = {0};
+
+    // 1. Otwieramy plik
+    FILE* in = fopen("pracownicy.txt", "r");
+    if (in == NULL) {
+        perror("fopen");
+        return EXIT_FAILURE;
+    }
+
+    // 2. Odczytujemy liczbe pracownikow
+    if (fscanf(in, "%d", &firma.liczba) != 1 ||
+        firma.liczba <= 0) {
+        fprintf(stderr, "Niepoprawna liczba pracownikow\n");
+        fclose(in);
+        return EXIT_FAILURE;
+    }
+
+    // 3. Alokujemy pamiec na pracownikow
+    size_t n = (size_t)firma.liczba;
+
+    if (n > ((size_t)-1) / sizeof(Pracownik)) {
+        fprintf(stderr, "Za duzo pracownikow\n");
+        fclose(in);
+        return EXIT_FAILURE;
+    }
+
+    firma.osoby = malloc(n * sizeof(Pracownik));
+
+    if (firma.osoby == NULL) {
+        perror("malloc");
+        fclose(in);
+        return EXIT_FAILURE;
+    }
+
+    // 4. Wczytujemy dane do tablicy
+    for (int i = 0; i < firma.liczba; i++) {
+        if (fscanf(in, "%49s %d %d",
+                   firma.osoby[i].imie,
+                   &firma.osoby[i].wiek,
+                   &firma.osoby[i].pensja) != 3) {
+            fprintf(stderr, "Blad odczytu pracownika\n");
+            free(firma.osoby);
+            fclose(in);
+            return EXIT_FAILURE;
+        }
+    }
+
+    if (fclose(in) != 0) {
+        perror("fclose");
+        free(firma.osoby);
+        return EXIT_FAILURE;
+    }
+
+    // 5. Liczymy sume pensji
+    long long suma = 0;
+
+    for (int i = 0; i < firma.liczba; i++) {
+        suma += firma.osoby[i].pensja;
+    }
+
+    // 6. Otwieramy plik wynikowy
+    FILE* out = fopen("wynik.txt", "w");
+
+    if (out == NULL) {
+        perror("fopen");
+        free(firma.osoby);
+        return EXIT_FAILURE;
+    }
+
+    // 7. Zapisujemy wynik
+    int zapis = fprintf(out, "Suma pensji: %lld\n", suma);
+
+    if (zapis < 0) {
+        fprintf(stderr, "Blad zapisu\n");
+        fclose(out);
+        free(firma.osoby);
+        return EXIT_FAILURE;
+    }
+
+    if (fclose(out) != 0) {
+        perror("fclose");
+        free(firma.osoby);
+        return EXIT_FAILURE;
+    }
+
+    // 8. Zwalniamy pamiec
+    free(firma.osoby);
+
+    return EXIT_SUCCESS;
+}
